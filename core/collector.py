@@ -20,7 +20,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "app": {
         "refresh_interval_seconds": 180,
         "cache_path": "data/usage.json",
-        "timezone": "local",
     },
     "ui": {
         "always_on_top": True,
@@ -32,7 +31,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "expanded_height": 300,
         "click_title_to_toggle_collapse": True,
         "show_reset_times": True,
-        "reset_display_mode": "time",
         "compact_summary_show_reset": True,
     },
     "provider": {"timeout_seconds": 15},
@@ -41,10 +39,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "deepseek": {
         "enabled": True,
         "balance_url": "https://api.deepseek.com/user/balance",
-        "preferred_currency": "CNY",
+        "preferred_currency": "",
         "daily_snapshot_path": "data/deepseek_daily.json",
     },
-    "security": {"redact_secrets": True, "log_level": "info"},
 }
 
 

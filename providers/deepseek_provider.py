@@ -108,7 +108,7 @@ class DeepSeekProvider(BaseProvider):
         snapshot_path = _snapshot_path(self.project_root, self.config)
         snapshot = load_or_create_snapshot(
             snapshot_path,
-            currency=str(balance.get("currency") or "CNY"),
+            currency=str(balance.get("currency") or "UNKNOWN"),
             start_balance=float(balance.get("total", 0.0)),
         )
         snapshot = compute_today_spend(snapshot, latest_balance=float(balance.get("total", 0.0)))
@@ -131,7 +131,7 @@ class DeepSeekProvider(BaseProvider):
 
 
 def _parse_balance(payload: Mapping[str, Any], config: Mapping[str, Any]) -> dict[str, Any]:
-    preferred = str(config.get("preferred_currency") or "CNY").upper()
+    preferred = str(config.get("preferred_currency") or "").strip().upper()
     is_available = payload.get("is_available")
     balance_infos = payload.get("balance_infos")
     if not isinstance(balance_infos, list) or not balance_infos:
@@ -142,10 +142,11 @@ def _parse_balance(payload: Mapping[str, Any], config: Mapping[str, Any]) -> dic
         )
 
     entry = None
-    for item in balance_infos:
-        if isinstance(item, Mapping) and str(item.get("currency") or "").upper() == preferred:
-            entry = item
-            break
+    if preferred:
+        for item in balance_infos:
+            if isinstance(item, Mapping) and str(item.get("currency") or "").upper() == preferred:
+                entry = item
+                break
     if entry is None:
         entry = balance_infos[0]
     if not isinstance(entry, Mapping):
@@ -167,7 +168,7 @@ def _parse_balance(payload: Mapping[str, Any], config: Mapping[str, Any]) -> dic
 
     return normalize_deepseek_balance(
         {
-            "currency": str(entry.get("currency") or preferred),
+            "currency": str(entry.get("currency") or preferred or "UNKNOWN"),
             "total": total,
             "granted": granted if granted is not None else 0.0,
             "toppedUp": topped_up if topped_up is not None else 0.0,

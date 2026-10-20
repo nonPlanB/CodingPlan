@@ -40,7 +40,7 @@ def normalize_deepseek_balance(
     result = empty_deepseek_provider(status, message)
     if balance is not None:
         result["balance"] = {
-            "currency": str(balance.get("currency") or "CNY"),
+            "currency": str(balance.get("currency") or "UNKNOWN"),
             "total": float(balance.get("total", 0.0)),
             "granted": float(balance.get("granted", 0.0)),
             "toppedUp": float(balance.get("toppedUp", 0.0)),

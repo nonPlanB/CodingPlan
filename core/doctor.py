@@ -23,7 +23,6 @@ def run_doctor(project_root: Path, config: dict[str, Any]) -> list[tuple[str, bo
     checks.append(("PySide6", *_module_check("PySide6")))
     checks.append(("PyYAML", *_module_check("yaml")))
     checks.append(("python-dotenv", *_module_check("dotenv")))
-    checks.append(("pytest", *_module_check("pytest")))
     checks.append((".env file", env_path.exists(), "found" if env_path.exists() else "missing"))
     checks.append(("KIMI_API_KEY", bool(os.getenv("KIMI_API_KEY")), _set_text("KIMI_API_KEY")))
     checks.append(("KIMI_CODING_API_KEY", bool(os.getenv("KIMI_CODING_API_KEY")), _set_text("KIMI_CODING_API_KEY")))
@@ -46,7 +45,6 @@ def run_doctor(project_root: Path, config: dict[str, Any]) -> list[tuple[str, bo
             "Network errors may be caused by proxy, TLS interception, or Codex endpoint changes.",
         )
     )
-    checks.append(("CC Switch", *_detect_cc_switch()))
     config_path = project_root / "config.yaml"
     checks.append(("config.yaml", config_path.exists(), "exists" if config_path.exists() else "not found"))
     return checks
@@ -81,17 +79,3 @@ def _set_text(name: str) -> str:
 
 def _found_text(command: str) -> str:
     return "found" if command_found(command) else "not found"
-
-
-def _detect_cc_switch() -> tuple[bool, str]:
-    if command_found("cc-switch"):
-        return True, "command found"
-    candidates = [
-        Path(os.getenv("LOCALAPPDATA", "")) / "CC Switch",
-        Path(os.getenv("APPDATA", "")) / "CC Switch",
-        Path(os.getenv("LOCALAPPDATA", "")) / "cc-switch",
-        Path(os.getenv("APPDATA", "")) / "cc-switch",
-    ]
-    if any(path.exists() for path in candidates):
-        return True, "installation data found"
-    return False, "not detected (optional)"

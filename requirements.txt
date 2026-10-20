@@ -1,5 +1,4 @@
 PySide6
 PyYAML
 python-dotenv
-pytest
-pyinstaller
+kimi-code-usage

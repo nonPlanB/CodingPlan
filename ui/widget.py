@@ -120,7 +120,7 @@ class DeepSeekCard(ProviderCard):
     def _update_rows(self, data: dict[str, Any], status: str) -> None:
         balance = data.get("balance") or {}
         today = data.get("today") or {}
-        currency = str(balance.get("currency") or "CNY")
+        currency = str(balance.get("currency") or "UNKNOWN")
         total = balance.get("total")
         spend = today.get("estimatedSpend")
         total_text = "--" if total is None else f"{currency} {float(total):.2f}"

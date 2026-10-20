@@ -56,10 +56,10 @@ def format_status(usage: dict[str, Any]) -> str:
             balance = provider.get("balance") or {}
             today = provider.get("today") or {}
             if balance.get("total") is not None:
-                currency = str(balance.get("currency") or "CNY")
+                currency = str(balance.get("currency") or "UNKNOWN")
                 lines.append(f"  Balance  {currency} {float(balance['total']):.2f}")
             if today.get("estimatedSpend") is not None:
-                today_currency = str(today.get("currency") or balance.get("currency") or "CNY")
+                today_currency = str(today.get("currency") or balance.get("currency") or "UNKNOWN")
                 lines.append(f"  Today    ~ {today_currency} {float(today['estimatedSpend']):.2f}")
         else:
             five = provider.get("fiveHour", {})

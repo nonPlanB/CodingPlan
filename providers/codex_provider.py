@@ -65,7 +65,7 @@ class CodexProvider(BaseProvider):
                 return empty_provider("Codex", "unsupported", "Codex custom command is empty.")
             return self._collect_custom(custom_command)
 
-        if mode in {"auto", "official_oauth", "cc_switch"}:
+        if mode in {"auto", "official_oauth"}:
             official = self._collect_official_oauth()
             if official["status"] != "unsupported":
                 return official

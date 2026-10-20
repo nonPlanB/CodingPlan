@@ -1,7 +1,6 @@
 app:
   refresh_interval_seconds: 180
   cache_path: "data/usage.json"
-  timezone: "local"
 
 ui:
   always_on_top: true
@@ -13,14 +12,13 @@ ui:
   expanded_height: 300
   click_title_to_toggle_collapse: true
   show_reset_times: true
-  reset_display_mode: "time"
   compact_summary_show_reset: true
 
 provider:
   timeout_seconds: 15
 
 kimi:
-  enabled: true
+  enabled: false
   command: "kimi-usage --json"
 
 codex:
@@ -29,11 +27,8 @@ codex:
   custom_command: ""
 
 deepseek:
-  enabled: true
+  enabled: false
   balance_url: "https://api.deepseek.com/user/balance"
-  preferred_currency: "CNY"
+  # Empty means use the first currency returned by the account.
+  preferred_currency: ""
   daily_snapshot_path: "data/deepseek_daily.json"
-
-security:
-  redact_secrets: true
-  log_level: "info"
