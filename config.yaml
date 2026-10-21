@@ -1,34 +1,32 @@
 app:
   refresh_interval_seconds: 180
-  cache_path: "data/usage.json"
-
+  cache_path: data/usage.json
 ui:
+  title: Coding Energy
+  theme: dark
+  visible_providers:
+  - codex
   always_on_top: true
-  opacity: 0.92
-  width: 280
-  height: 300
+  opacity: 0.9
+  width: 360
+  height: 360
   collapsible: true
   collapsed_height: 64
-  expanded_height: 300
+  expanded_height: 250
   click_title_to_toggle_collapse: true
   show_reset_times: true
   compact_summary_show_reset: true
-
 provider:
   timeout_seconds: 15
-
 kimi:
   enabled: false
-  command: "kimi-usage --json"
-
+  command: kimi-usage --json
 codex:
   enabled: true
-  mode: "auto"
-  custom_command: ""
-
+  mode: auto
+  custom_command: ''
 deepseek:
   enabled: false
-  balance_url: "https://api.deepseek.com/user/balance"
-  # Empty means use the first currency returned by the account.
-  preferred_currency: ""
-  daily_snapshot_path: "data/deepseek_daily.json"
+  balance_url: https://api.deepseek.com/user/balance
+  preferred_currency: ''
+  daily_snapshot_path: data/deepseek_daily.json

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from copy import deepcopy
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +17,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
+    QProgressBar,
+    QDialog,
     QPushButton,
     QSizePolicy,
     QSystemTrayIcon,
@@ -30,6 +33,7 @@ from core.time_display import format_reset_time
 from core.paths import application_icon_path, data_path, project_root as project_root_func
 from core.security import sanitize_message
 from core.ui_state import read_ui_state, write_ui_state
+from ui.settings import SettingsDialog
 
 COLOR_NORMAL = "#65d6a6"
 COLOR_WARNING = "#f5c451"
@@ -56,12 +60,15 @@ class RefreshThread(QThread):
 
 
 class ProviderCard(QFrame):
-    def __init__(self, title: str) -> None:
+    def __init__(self, title: str, show_reset: bool = True) -> None:
         super().__init__()
+        self.light = False
+        self.show_reset = show_reset
+        self.bars = {}
         self.setObjectName("providerCard")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(11, 7, 11, 7)
-        layout.setSpacing(2)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(6)
         header = QHBoxLayout()
         self.title = QLabel(title.upper())
         self.title.setObjectName("cardTitle")
@@ -86,16 +93,23 @@ class ProviderCard(QFrame):
         widget = QLabel(f"{label:<5} --")
         widget.setObjectName("quota")
         layout.addWidget(widget)
+        if label in ("5H", "WEEK"):
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setTextVisible(False)
+            bar.setFixedHeight(5)
+            layout.addWidget(bar)
+            self.bars[label] = bar
         return widget
 
     def update_data(self, data: dict[str, Any]) -> None:
         status = data.get("status", "error")
-        self.status.setText(str(status))
+        self.status.setText({"ok": "● 已同步", "offline": "离线", "error": "异常", "unsupported": "未启用 / 未配置"}.get(status, str(status)))
         self.status.setStyleSheet(
-            f"color: {COLOR_NORMAL if status == 'ok' else COLOR_MUTED};"
+            f"color: {self._color(100, status)};"
         )
         self._update_rows(data, status)
-        message = str(data.get("message") or "")
+        message = sanitize_message(data.get("message") or "", 160)
         self.message.setText(message)
         self.message.setVisible(bool(message) and status != "ok")
 
@@ -108,8 +122,19 @@ class ProviderCard(QFrame):
         pct_text = "  --" if value is None else f"{value:>3}%"
         reset = format_reset_time(window.get("resetAt")) if isinstance(window, dict) else "--"
         stale = " stale" if value is not None and status != "ok" else ""
-        label.setText(f"{prefix:<5} {pct_text}   {reset}{stale}")
-        label.setStyleSheet(f"color: {_quota_color(value, status)};")
+        reset_text = f"   重置 {reset}" if self.show_reset else ""
+        label.setText(f"{prefix:<5} {pct_text}{reset_text}{stale}")
+        bar = self.bars[prefix]
+        bar.setValue(max(0, min(100, round(value))) if isinstance(value, (int, float)) else 0)
+        bar.setStyleSheet(f"QProgressBar::chunk {{ background: {self._color(value, status)}; border-radius: 2px; }}")
+        label.setStyleSheet(f"color: {self._color(value, status)};")
+
+
+    def _color(self, value, status):
+        color = _quota_color(value, status)
+        if self.light:
+            return {COLOR_NORMAL: "#167858", COLOR_WARNING: "#926000", COLOR_DANGER: "#bd3144", COLOR_MUTED: "#586b84"}[color]
+        return color
 
 
 class DeepSeekCard(ProviderCard):
@@ -130,7 +155,7 @@ class DeepSeekCard(ProviderCard):
         self.today.setText(
             f"{'TODAY':<5} {spend_text}{'  stale' if stale and spend is not None else ''}"
         )
-        color = _quota_color(100 if status == "ok" else None, status)
+        color = self._color(100 if status == "ok" else None, status)
         self.bal.setStyleSheet(f"color: {color};")
         self.today.setStyleSheet(f"color: {color};")
 
@@ -141,7 +166,8 @@ class CodingPlanWidget(QWidget):
         self.project_root = project_root or project_root_func()
         self.config = load_config(self.project_root)
         self.cache_path = resolve_cache_path(self.project_root, self.config["app"]["cache_path"])
-        self.state_path = data_path("ui_state.json")
+        self.state_path = self.project_root / "data" / "ui_state.json"
+        self._refresh_pending = False
         self.drag_offset = None
         self.refresh_thread: RefreshThread | None = None
         self.exit_requested = False
@@ -187,6 +213,8 @@ class CodingPlanWidget(QWidget):
         if self.always_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
+        if hasattr(self, "tray_top_action"):
+            self.tray_top_action.setChecked(self.always_on_top)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -196,7 +224,8 @@ class CodingPlanWidget(QWidget):
         self.header_widget = QWidget(self)
         header = QHBoxLayout(self.header_widget)
         header.setContentsMargins(0, 0, 0, 0)
-        title = QLabel("CODING ENERGY")
+        title = QLabel(self.config["ui"].get("title", "Coding Energy"))
+        self.title_label = title
         title.setObjectName("header")
         header.addWidget(title)
         self.face = QLabel("(?_?)")
@@ -204,10 +233,17 @@ class CodingPlanWidget(QWidget):
         header.addWidget(self.face)
         header.addStretch()
 
-        self.refresh_btn = QPushButton("↻")
+        self.settings_btn = QPushButton("设置")
+        self.settings_btn.setObjectName("iconButton")
+        self.settings_btn.setFixedSize(38, 28)
+        self.settings_btn.setToolTip("设置")
+        self.settings_btn.setAccessibleName("设置")
+        self.settings_btn.clicked.connect(self.open_settings)
+        header.addWidget(self.settings_btn)
+        self.refresh_btn = QPushButton("刷新")
         self.refresh_btn.setObjectName("iconButton")
         self.refresh_btn.setFlat(True)
-        self.refresh_btn.setFixedSize(22, 22)
+        self.refresh_btn.setFixedSize(38, 28)
         self.refresh_btn.setToolTip("Refresh")
         self.refresh_btn.clicked.connect(self.refresh_data)
         header.addWidget(self.refresh_btn)
@@ -215,7 +251,7 @@ class CodingPlanWidget(QWidget):
         self.collapse_btn = QPushButton("˄")
         self.collapse_btn.setObjectName("iconButton")
         self.collapse_btn.setFlat(True)
-        self.collapse_btn.setFixedSize(22, 22)
+        self.collapse_btn.setFixedSize(26, 26)
         self.collapse_btn.setToolTip("Collapse/Expand")
         self.collapse_btn.clicked.connect(self._toggle_collapse)
         self.collapse_btn.setVisible(self.collapsible)
@@ -233,6 +269,10 @@ class CodingPlanWidget(QWidget):
         cards_layout.addWidget(self.codex_card)
         cards_layout.addWidget(self.kimi_card)
         cards_layout.addWidget(self.deepseek_card)
+        self.empty_label = QLabel("暂无显示的数据源，请在设置中选择。")
+        self.empty_label.setObjectName("message")
+        self.empty_label.setWordWrap(True)
+        cards_layout.addWidget(self.empty_label)
         root.addWidget(self.cards_widget)
 
         self.summary = QLabel("")
@@ -248,26 +288,68 @@ class CodingPlanWidget(QWidget):
         self.updated.setObjectName("updated")
         root.addWidget(self.updated)
 
+        self._apply_provider_visibility()
         self._apply_collapse_state(initial=True)
 
     def _apply_style(self) -> None:
-        self.setStyleSheet(
-            """
-            QWidget { color: #f1f4f8; font-family: "Segoe UI"; font-size: 12px; }
-            #header { font-size: 14px; font-weight: 700; letter-spacing: 1px; }
-            #face { color: #86a7ff; font-family: Consolas; font-weight: 700; }
-            #providerCard { background: rgba(35, 40, 52, 215); border: 1px solid rgba(255,255,255,25); border-radius: 8px; }
-            #cardTitle { color: #b9c7df; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
-            #providerStatus { color: #87909f; font-size: 9px; }
-            #quota { font-family: Consolas; font-size: 14px; font-weight: 700; }
-            #message { color: #87909f; font-size: 9px; }
-            #updated { color: #87909f; font-size: 10px; }
-            #iconButton { color: #b9c7df; font-family: "Segoe UI"; font-size: 14px; font-weight: 700; border: none; background: transparent; }
-            #iconButton:hover { color: #f1f4f8; }
-            #iconButton:disabled { color: #555c66; }
-            #summary { font-family: Consolas; font-size: 10px; font-weight: 700; color: #b9c7df; }
-            """
-        )
+        light = self.config["ui"].get("theme") == "light"
+        text, muted, card, border = ("#18283f", "#586b84", "#ffffff", "#d8e2ef") if light else ("#e7edf8", "#9baac1", "#202c40", "#34445d")
+        self.setStyleSheet(f"""
+            QWidget {{ color: {text}; font-family: "Segoe UI", "Microsoft YaHei UI"; font-size: 12px; }}
+            #header {{ font-size: 16px; font-weight: 700; }}
+            #face {{ color: #6c96f5; font-family: Consolas; font-weight: 700; }}
+            #providerCard {{ background: {card}; border: 1px solid {border}; border-radius: 12px; }}
+            #cardTitle {{ color: {text}; font-size: 12px; font-weight: 700; letter-spacing: 1px; }}
+            #providerStatus {{ color: {muted}; font-size: 10px; }}
+            #quota {{ font-family: "Consolas", "Microsoft YaHei UI"; font-size: 13px; font-weight: 600; }}
+            #message, #updated {{ color: {muted}; font-size: 11px; }}
+            #iconButton {{ color: {muted}; font-size: 12px; border: none; border-radius: 6px; background: transparent; }}
+            #iconButton:hover {{ background: {border}; color: {text}; }}
+            #iconButton:disabled {{ color: #657085; }}
+            #summary {{ color: {text}; font-family: Consolas; font-size: 11px; }}
+            QProgressBar {{ background: {border}; border: none; border-radius: 2px; }}
+            QMenu {{ background: {card}; color: {text}; border: 1px solid {border}; padding: 5px; }}
+            QMenu::item {{ padding: 7px 18px; }} QMenu::item:selected {{ background: {border}; }}
+        """)
+        self.update()
+
+    def _apply_provider_visibility(self) -> None:
+        visible = self.config["ui"].get("visible_providers", ["codex", "kimi", "deepseek"])
+        for key, card in (("codex", self.codex_card), ("kimi", self.kimi_card), ("deepseek", self.deepseek_card)):
+            card.setVisible(key in visible)
+            card.show_reset = self.config["ui"].get("show_reset_times", True)
+            card.light = self.config["ui"].get("theme") == "light"
+        self.empty_label.setVisible(not visible)
+
+    def open_settings(self) -> None:
+        config = deepcopy(self.config)
+        config["ui"]["always_on_top"] = self.always_on_top
+        dialog = SettingsDialog(self.project_root, config, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.config = dialog.config
+        ui = self.config["ui"]
+        self.title_label.setText(ui["title"])
+        self.setWindowOpacity(ui["opacity"])
+        position = self.pos()
+        self.always_on_top = ui["always_on_top"]
+        self._apply_flags()
+        self.move(position)
+        self.show()
+        self.collapsible = ui["collapsible"]
+        self.collapsed = self.collapsed and self.collapsible
+        self.collapse_btn.setVisible(self.collapsible)
+        self.expanded_height = ui["expanded_height"]
+        self.timer.setInterval(self.config["app"]["refresh_interval_seconds"] * 1000)
+        self._apply_provider_visibility()
+        self._apply_style()
+        self.load_cache()
+        self._apply_collapse_state()
+        self._save_state()
+        if self.refresh_thread and self.refresh_thread.isRunning():
+            self._refresh_pending = True
+        else:
+            self.refresh_data()
 
     def _setup_tray(self) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -281,18 +363,21 @@ class CodingPlanWidget(QWidget):
         show_action = menu.addAction("Show")
         hide_action = menu.addAction("Hide")
         refresh_action = menu.addAction("Refresh")
+        settings_action = menu.addAction("设置")
         menu.addSeparator()
         data_action = menu.addAction("Open Data Folder")
         project_action = menu.addAction("Open Project Folder")
         top_action = QAction("Toggle Always on Top", menu)
         top_action.setCheckable(True)
         top_action.setChecked(self.always_on_top)
+        self.tray_top_action = top_action
         menu.addAction(top_action)
         menu.addSeparator()
         exit_action = menu.addAction("Exit")
         show_action.triggered.connect(self.show_and_activate)
         hide_action.triggered.connect(self.hide)
         refresh_action.triggered.connect(self.refresh_data)
+        settings_action.triggered.connect(self.open_settings)
         data_action.triggered.connect(self.open_data_folder)
         project_action.triggered.connect(self.open_project_folder)
         top_action.triggered.connect(self.toggle_always_on_top)
@@ -329,7 +414,7 @@ class CodingPlanWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         path = QPainterPath()
         path.addRoundedRect(self.rect().adjusted(1, 1, -1, -1), 13, 13)
-        painter.fillPath(path, QColor(18, 21, 29, 235))
+        painter.fillPath(path, QColor("#edf2fa" if self.config["ui"].get("theme") == "light" else "#141d2c"))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -385,7 +470,8 @@ class CodingPlanWidget(QWidget):
             self.setMaximumSize(16777215, 16777215)
             self.setMinimumSize(0, 0)
             self.setFixedWidth(width)
-            self.resize(width, self.expanded_height)
+            self.layout().activate()
+            self.resize(width, max(self.expanded_height, self.sizeHint().height()))
         self._update_summary()
 
     def _update_summary(self) -> None:
@@ -395,7 +481,8 @@ class CodingPlanWidget(QWidget):
             self.config["ui"].get("show_reset_times", True)
             and self.config["ui"].get("compact_summary_show_reset", True)
         )
-        text = _format_compact_summary(providers, show_reset=show_reset)
+        visible = self.config["ui"].get("visible_providers", ["codex", "kimi", "deepseek"])
+        text = _format_compact_summary({key: value for key, value in providers.items() if key in visible}, show_reset=show_reset)
         freshness = compute_cache_freshness(
             str(usage.get("updatedAt")) if usage.get("updatedAt") else None
         )
@@ -415,6 +502,7 @@ class CodingPlanWidget(QWidget):
         menu = QMenu(self)
         hide_action = menu.addAction("Hide")
         refresh_action = menu.addAction("Refresh")
+        settings_action = menu.addAction("设置")
         top_action = QAction("Always on Top", menu)
         top_action.setCheckable(True)
         top_action.setChecked(self.always_on_top)
@@ -426,6 +514,8 @@ class CodingPlanWidget(QWidget):
         chosen = menu.exec(event.globalPos())
         if chosen == hide_action:
             self.hide()
+        elif chosen == settings_action:
+            self.open_settings()
         elif chosen == refresh_action:
             self.refresh_data()
         elif chosen == top_action:
@@ -440,6 +530,7 @@ class CodingPlanWidget(QWidget):
     def refresh_data(self) -> None:
         if self.refresh_thread and self.refresh_thread.isRunning():
             return
+        self._refresh_error = False
         self.updated.setText("Refreshing...")
         if self.collapsed:
             self.summary.setText("Refreshing...")
@@ -452,19 +543,25 @@ class CodingPlanWidget(QWidget):
         self.refresh_thread.start()
 
     def _refresh_failed(self, message: str) -> None:
+        self._refresh_error = True
         self.updated.setText(f"Refresh error: {sanitize_message(message, 120)}")
         if self.collapsed:
             self.summary.setText("Refresh error")
 
     def _refresh_finished(self) -> None:
         self.refresh_btn.setEnabled(True)
-        self.refresh_btn.setText("↻")
+        self.refresh_btn.setText("刷新")
         thread = self.refresh_thread
         self.refresh_thread = None
         if thread is not None:
             thread.deleteLater()
+        if not getattr(self, "_refresh_error", False):
+            self._update_freshness()
         if self.exit_requested:
             self._finish_exit()
+        elif self._refresh_pending:
+            self._refresh_pending = False
+            self.refresh_data()
 
     def load_cache(self) -> None:
         usage = read_usage(self.cache_path, create_if_missing=True)
@@ -475,11 +572,13 @@ class CodingPlanWidget(QWidget):
         self.codex_card.update_data(codex)
         self.kimi_card.update_data(kimi)
         self.deepseek_card.update_data(deepseek)
-        values = _remaining_values((codex, kimi))
+        visible = self.config["ui"].get("visible_providers", ["codex", "kimi", "deepseek"])
+        values = _remaining_values(tuple(providers.get(key, {}) for key in ("codex", "kimi") if key in visible))
         self.face.setText(_face(min(values) if values else None))
         self.last_updated_at = usage.get("updatedAt")
         self._update_summary()
         self._update_freshness()
+        self._apply_collapse_state()
 
     def _update_freshness(self) -> None:
         if self.refresh_thread and self.refresh_thread.isRunning():
@@ -617,18 +716,17 @@ def _format_compact_summary(providers: dict[str, Any], show_reset: bool = True) 
         weekly = provider.get("weekly", {})
         return f"{prefix} {pct(five)}/{pct(weekly)}"
 
-    parts = [
-        provider_summary(codex, "C"),
-        provider_summary(kimi, "K"),
-    ]
+    parts = [provider_summary(providers[key], label) for key, label in (("codex", "C"), ("kimi", "K")) if key in providers]
 
     balance = deepseek.get("balance") or {}
-    if deepseek.get("status") == "ok" and balance.get("total") is not None:
+    if "deepseek" not in providers:
+        pass
+    elif deepseek.get("status") == "ok" and balance.get("total") is not None:
         parts.append(f"DS {float(balance['total']):.2f}")
     else:
         parts.append("DS offline")
 
-    summary = "  ".join(parts)
+    summary = "  ".join(parts) or "暂无显示的数据源"
 
     if not show_reset:
         return summary
