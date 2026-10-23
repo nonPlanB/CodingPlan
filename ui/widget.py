@@ -34,11 +34,20 @@ from core.paths import application_icon_path, data_path, project_root as project
 from core.security import sanitize_message
 from core.ui_state import read_ui_state, write_ui_state
 from ui.settings import SettingsDialog
+from ui.taskbar import TaskbarQuotaStrip, logo_path
 
 COLOR_NORMAL = "#65d6a6"
 COLOR_WARNING = "#f5c451"
 COLOR_DANGER = "#ff6b7a"
 COLOR_MUTED = "#87909f"
+
+
+def _localized_updated(value) -> str:
+    text = format_updated_with_freshness(value)
+    for old, new in (("Updated", "更新于"), ("Fresh", "已同步"), ("Stale", "数据陈旧"),
+                     ("Expired", "已过期"), ("Unknown", "尚未同步")):
+        text = text.replace(old, new)
+    return text
 
 
 class RefreshThread(QThread):
@@ -65,14 +74,20 @@ class ProviderCard(QFrame):
         self.light = False
         self.show_reset = show_reset
         self.bars = {}
+        self.row_names = {}
+        self.reset_labels = {}
         self.setObjectName("providerCard")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(6)
+        layout.setSpacing(8)
         header = QHBoxLayout()
-        self.title = QLabel(title.upper())
+        self.provider_key = title.lower()
+        self.logo = QLabel()
+        self.logo.setFixedSize(24, 24)
+        header.addWidget(self.logo)
+        self.title = QLabel(title)
         self.title.setObjectName("cardTitle")
-        self.status = QLabel("unsupported")
+        self.status = QLabel("未配置")
         self.status.setObjectName("providerStatus")
         header.addWidget(self.title)
         header.addStretch()
@@ -90,9 +105,16 @@ class ProviderCard(QFrame):
         self.week = self._row("WEEK", layout)
 
     def _row(self, label: str, layout: QVBoxLayout) -> QLabel:
-        widget = QLabel(f"{label:<5} --")
+        row = QHBoxLayout()
+        name = QLabel({"5H": "5 小时剩余", "WEEK": "每周剩余", "BAL": "账户余额", "TODAY": "今日消费估算"}[label])
+        name.setObjectName("quotaName")
+        self.row_names[label] = name
+        row.addWidget(name)
+        row.addStretch()
+        widget = QLabel("--")
         widget.setObjectName("quota")
-        layout.addWidget(widget)
+        row.addWidget(widget)
+        layout.addLayout(row)
         if label in ("5H", "WEEK"):
             bar = QProgressBar()
             bar.setRange(0, 100)
@@ -100,9 +122,15 @@ class ProviderCard(QFrame):
             bar.setFixedHeight(5)
             layout.addWidget(bar)
             self.bars[label] = bar
+            reset = QLabel()
+            reset.setObjectName("resetTime")
+            self.reset_labels[label] = reset
+            layout.addWidget(reset)
         return widget
 
     def update_data(self, data: dict[str, Any]) -> None:
+        self.logo.setPixmap(QPixmap(str(logo_path(self.provider_key, self.light))).scaled(
+            24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         status = data.get("status", "error")
         self.status.setText({"ok": "● 已同步", "offline": "离线", "error": "异常", "unsupported": "未启用 / 未配置"}.get(status, str(status)))
         self.status.setStyleSheet(
@@ -119,11 +147,13 @@ class ProviderCard(QFrame):
 
     def _set_quota(self, label: QLabel, prefix: str, window: dict[str, Any], status: str) -> None:
         value = window.get("remainingPercent") if isinstance(window, dict) else None
-        pct_text = "  --" if value is None else f"{value:>3}%"
+        pct_text = "--" if value is None else f"{value:g}%"
         reset = format_reset_time(window.get("resetAt")) if isinstance(window, dict) else "--"
-        stale = " stale" if value is not None and status != "ok" else ""
-        reset_text = f"   重置 {reset}" if self.show_reset else ""
-        label.setText(f"{prefix:<5} {pct_text}{reset_text}{stale}")
+        stale = " · 已过期" if value is not None and status != "ok" else ""
+        label.setText(pct_text)
+        self.reset_labels[prefix].setText(f"重置于 {reset}{stale}")
+        self.reset_labels[prefix].setVisible(self.show_reset or bool(stale))
+        self.row_names[prefix].setToolTip("剩余额度")
         bar = self.bars[prefix]
         bar.setValue(max(0, min(100, round(value))) if isinstance(value, (int, float)) else 0)
         bar.setStyleSheet(f"QProgressBar::chunk {{ background: {self._color(value, status)}; border-radius: 2px; }}")
@@ -151,9 +181,9 @@ class DeepSeekCard(ProviderCard):
         total_text = "--" if total is None else f"{currency} {float(total):.2f}"
         spend_text = "--" if spend is None else f"~{currency} {float(spend):.2f}"
         stale = status != "ok"
-        self.bal.setText(f"{'BAL':<5} {total_text}{'  stale' if stale and total is not None else ''}")
+        self.bal.setText(f"{total_text}{' · 已过期' if stale and total is not None else ''}")
         self.today.setText(
-            f"{'TODAY':<5} {spend_text}{'  stale' if stale and spend is not None else ''}"
+            f"{spend_text}{' · 已过期' if stale and spend is not None else ''}"
         )
         color = self._color(100 if status == "ok" else None, status)
         self.bal.setStyleSheet(f"color: {color};")
@@ -172,8 +202,14 @@ class CodingPlanWidget(QWidget):
         self.refresh_thread: RefreshThread | None = None
         self.exit_requested = False
         self.last_updated_at: Any = None
+        self._taskbar_usage: dict[str, Any] = {}
         self.tray_icon: QSystemTrayIcon | None = None
         saved_state = read_ui_state(self.state_path)
+        self.taskbar_strip = TaskbarQuotaStrip(saved_state.get("taskbar_offset", 0)) if os.name == "nt" else None
+        if self.taskbar_strip is not None:
+            self.taskbar_strip.restore_requested.connect(self.show_and_activate)
+            self.taskbar_strip.offset_changed.connect(self._save_taskbar_offset)
+            self.taskbar_strip.context_menu_requested.connect(self._show_context_menu)
         self.always_on_top = bool(
             saved_state.get("always_on_top", self.config["ui"].get("always_on_top", True))
         )
@@ -209,6 +245,7 @@ class CodingPlanWidget(QWidget):
         QTimer.singleShot(0, self.refresh_data)
 
     def _apply_flags(self) -> None:
+        # Tool windows stay out of the Windows taskbar and its thumbnail list.
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
         if self.always_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
@@ -231,6 +268,7 @@ class CodingPlanWidget(QWidget):
         self.face = QLabel("(?_?)")
         self.face.setObjectName("face")
         header.addWidget(self.face)
+        self.face.hide()
         header.addStretch()
 
         self.settings_btn = QPushButton("设置")
@@ -244,15 +282,23 @@ class CodingPlanWidget(QWidget):
         self.refresh_btn.setObjectName("iconButton")
         self.refresh_btn.setFlat(True)
         self.refresh_btn.setFixedSize(38, 28)
-        self.refresh_btn.setToolTip("Refresh")
+        self.refresh_btn.setToolTip("立即刷新额度")
         self.refresh_btn.clicked.connect(self.refresh_data)
         header.addWidget(self.refresh_btn)
+
+        self.hide_btn = QPushButton("—")
+        self.hide_btn.setObjectName("iconButton")
+        self.hide_btn.setFixedSize(24, 26)
+        self.hide_btn.setToolTip("隐藏主窗口（托盘和环形组件继续显示）")
+        self.hide_btn.setAccessibleName("隐藏主窗口")
+        self.hide_btn.clicked.connect(self.hide)
+        header.addWidget(self.hide_btn)
 
         self.collapse_btn = QPushButton("˄")
         self.collapse_btn.setObjectName("iconButton")
         self.collapse_btn.setFlat(True)
         self.collapse_btn.setFixedSize(26, 26)
-        self.collapse_btn.setToolTip("Collapse/Expand")
+        self.collapse_btn.setToolTip("折叠 / 展开")
         self.collapse_btn.clicked.connect(self._toggle_collapse)
         self.collapse_btn.setVisible(self.collapsible)
         header.addWidget(self.collapse_btn)
@@ -284,7 +330,7 @@ class CodingPlanWidget(QWidget):
         self.summary.hide()
         root.addWidget(self.summary)
 
-        self.updated = QLabel("Updated --:--")
+        self.updated = QLabel("更新于 --:--")
         self.updated.setObjectName("updated")
         root.addWidget(self.updated)
 
@@ -293,23 +339,27 @@ class CodingPlanWidget(QWidget):
 
     def _apply_style(self) -> None:
         light = self.config["ui"].get("theme") == "light"
-        text, muted, card, border = ("#18283f", "#586b84", "#ffffff", "#d8e2ef") if light else ("#e7edf8", "#9baac1", "#202c40", "#34445d")
+        text, muted, card, border = ("#202126", "#737681", "#ffffff", "#e2e3e8") if light else ("#f2f2f5", "#92929d", "#1b1b20", "#303038")
         self.setStyleSheet(f"""
             QWidget {{ color: {text}; font-family: "Segoe UI", "Microsoft YaHei UI"; font-size: 12px; }}
-            #header {{ font-size: 16px; font-weight: 700; }}
+            #header {{ font-size: 15px; font-weight: 700; }}
             #face {{ color: #6c96f5; font-family: Consolas; font-weight: 700; }}
-            #providerCard {{ background: {card}; border: 1px solid {border}; border-radius: 12px; }}
-            #cardTitle {{ color: {text}; font-size: 12px; font-weight: 700; letter-spacing: 1px; }}
-            #providerStatus {{ color: {muted}; font-size: 10px; }}
-            #quota {{ font-family: "Consolas", "Microsoft YaHei UI"; font-size: 13px; font-weight: 600; }}
-            #message, #updated {{ color: {muted}; font-size: 11px; }}
+            #providerCard {{ background: {card}; border: 1px solid {border}; border-radius: 10px; }}
+            #cardTitle {{ color: {text}; font-size: 14px; font-weight: 600; }}
+            #providerStatus {{ color: {muted}; font-size: 10px; padding: 3px 6px; background: {border}; border-radius: 5px; }}
+            #quota {{ font-family: "Segoe UI", "Microsoft YaHei UI"; font-size: 18px; font-weight: 600; }}
+            #quotaName {{ color: {muted}; font-size: 12px; }}
+            #resetTime, #message, #updated {{ color: {muted}; font-size: 11px; }}
             #iconButton {{ color: {muted}; font-size: 12px; border: none; border-radius: 6px; background: transparent; }}
             #iconButton:hover {{ background: {border}; color: {text}; }}
             #iconButton:disabled {{ color: #657085; }}
             #summary {{ color: {text}; font-family: Consolas; font-size: 11px; }}
             QProgressBar {{ background: {border}; border: none; border-radius: 2px; }}
-            QMenu {{ background: {card}; color: {text}; border: 1px solid {border}; padding: 5px; }}
-            QMenu::item {{ padding: 7px 18px; }} QMenu::item:selected {{ background: {border}; }}
+            QMenu {{ background: {card}; color: {text}; border: 1px solid {border}; border-radius: 10px; padding: 6px; }}
+            QMenu::item {{ padding: 8px 28px; border-radius: 5px; }}
+            QMenu::item:selected {{ background: {border}; }}
+            QMenu::item:disabled {{ color: {muted}; }}
+            QMenu::separator {{ height: 1px; background: {border}; margin: 5px 8px; }}
         """)
         self.update()
 
@@ -352,28 +402,39 @@ class CodingPlanWidget(QWidget):
             self.refresh_data()
 
     def _setup_tray(self) -> None:
-        if not QSystemTrayIcon.isSystemTrayAvailable():
-            return
         icon = self._application_icon()
         QApplication.instance().setWindowIcon(icon)
         self.setWindowIcon(icon)
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
         tray = QSystemTrayIcon(icon, self)
         tray.setToolTip("CodingPlanWidget")
-        menu = QMenu()
-        show_action = menu.addAction("Show")
-        hide_action = menu.addAction("Hide")
-        refresh_action = menu.addAction("Refresh")
-        settings_action = menu.addAction("设置")
-        menu.addSeparator()
-        data_action = menu.addAction("Open Data Folder")
-        project_action = menu.addAction("Open Project Folder")
-        top_action = QAction("Toggle Always on Top", menu)
+        menu = self._create_menu()
+        self.tray_top_action = menu.top_action
+        tray.activated.connect(self._tray_activated)
+        tray.setContextMenu(menu)
+        tray.show()
+        self.tray_icon = tray
+
+    def _create_menu(self) -> QMenu:
+        menu = QMenu(self)
+        show_action = menu.addAction("显示主窗口")
+        hide_action = menu.addAction("隐藏主窗口")
+        top_action = QAction("始终置顶", menu)
         top_action.setCheckable(True)
         top_action.setChecked(self.always_on_top)
-        self.tray_top_action = top_action
         menu.addAction(top_action)
+        menu.top_action = top_action
+        menu.aboutToShow.connect(lambda: top_action.setChecked(self.always_on_top))
         menu.addSeparator()
-        exit_action = menu.addAction("Exit")
+        refresh_action = menu.addAction("立即刷新")
+        menu.aboutToShow.connect(lambda: refresh_action.setEnabled(self.refresh_btn.isEnabled()))
+        settings_action = menu.addAction("设置")
+        menu.addSeparator()
+        data_action = menu.addAction("打开数据文件夹")
+        project_action = menu.addAction("打开项目文件夹")
+        menu.addSeparator()
+        exit_action = menu.addAction("退出程序")
         show_action.triggered.connect(self.show_and_activate)
         hide_action.triggered.connect(self.hide)
         refresh_action.triggered.connect(self.refresh_data)
@@ -382,11 +443,48 @@ class CodingPlanWidget(QWidget):
         project_action.triggered.connect(self.open_project_folder)
         top_action.triggered.connect(self.toggle_always_on_top)
         exit_action.triggered.connect(self.request_exit)
-        tray.activated.connect(self._tray_activated)
-        tray.setContextMenu(menu)
-        tray.show()
-        self.tray_icon = tray
+        return menu
 
+    def _update_taskbar(self) -> None:
+        visible = self.config["ui"].get("visible_providers", ["codex", "kimi", "deepseek"])
+        freshness = compute_cache_freshness(
+            str(self.last_updated_at) if self.last_updated_at else None
+        )
+        stale = freshness.status != "Fresh" or getattr(self, "_refresh_error", False)
+        providers = self._taskbar_usage.get("providers", {})
+        parts = []
+        for key, name in (("codex", "Codex"), ("kimi", "Kimi"), ("deepseek", "DeepSeek")):
+            if key not in visible:
+                continue
+            provider = providers.get(key, {})
+            status = provider.get("status", "error")
+            suffix = " [过期]" if stale or status != "ok" else ""
+            if key == "deepseek":
+                balance = provider.get("balance") or {}
+                value = balance.get("total")
+                if isinstance(value, (int, float)):
+                    parts.append(f"{name} {balance.get('currency') or ''} {value:.2f}{suffix}")
+                else:
+                    parts.append(f"{name} --")
+                continue
+            quotas = []
+            for field, label in (("fiveHour", "5H"), ("weekly", "WEEK")):
+                window = provider.get(field) or {}
+                value = window.get("remainingPercent")
+                if isinstance(value, (int, float)):
+                    value = max(0, min(100, round(value)))
+                    quotas.append(f"{label} {value}%")
+                else:
+                    quotas.append(f"{label} --")
+            parts.append(f"{name} {' · '.join(quotas)}{suffix}")
+        title = " | ".join(parts) or "暂无显示的数据源"
+        if self.taskbar_strip is not None:
+            self.taskbar_strip.update_quotas(
+                {key: providers.get(key, {}) for key in ("codex", "kimi", "deepseek") if key in visible},
+                stale, self.config["ui"].get("theme") == "light")
+        self.setWindowTitle(f"{self.config['ui'].get('title', 'Coding Energy')} | {title}")
+        if self.tray_icon is not None:
+            self.tray_icon.setToolTip(f"{self.windowTitle()}\n{_localized_updated(self.last_updated_at)}")
     def _application_icon(self) -> QIcon:
         icon_path = application_icon_path()
         if icon_path.exists():
@@ -414,7 +512,7 @@ class CodingPlanWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         path = QPainterPath()
         path.addRoundedRect(self.rect().adjusted(1, 1, -1, -1), 13, 13)
-        painter.fillPath(path, QColor("#edf2fa" if self.config["ui"].get("theme") == "light" else "#141d2c"))
+        painter.fillPath(path, QColor("#f5f5f7" if self.config["ui"].get("theme") == "light" else "#111113"))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -488,7 +586,8 @@ class CodingPlanWidget(QWidget):
         )
         lines = text.splitlines()
         if lines:
-            lines[-1] = f"{lines[-1]}  {freshness.status}"
+            state = {"Fresh": "已同步", "Stale": "数据陈旧", "Expired": "已过期", "Unknown": "尚未同步"}[freshness.status]
+            lines[-1] = f"{lines[-1]}  {state}"
         self.summary.setText("\n".join(lines))
         if self.collapsed and "\n" in self.summary.text():
             new_height = max(self.collapsed_height, 78)
@@ -499,41 +598,20 @@ class CodingPlanWidget(QWidget):
             self.resize(self.width(), self.collapsed_height)
 
     def contextMenuEvent(self, event) -> None:
-        menu = QMenu(self)
-        hide_action = menu.addAction("Hide")
-        refresh_action = menu.addAction("Refresh")
-        settings_action = menu.addAction("设置")
-        top_action = QAction("Always on Top", menu)
-        top_action.setCheckable(True)
-        top_action.setChecked(self.always_on_top)
-        menu.addAction(top_action)
-        folder_action = menu.addAction("Open Data Folder")
-        project_action = menu.addAction("Open Project Folder")
-        menu.addSeparator()
-        exit_action = menu.addAction("Exit")
-        chosen = menu.exec(event.globalPos())
-        if chosen == hide_action:
-            self.hide()
-        elif chosen == settings_action:
-            self.open_settings()
-        elif chosen == refresh_action:
-            self.refresh_data()
-        elif chosen == top_action:
-            self.toggle_always_on_top()
-        elif chosen == folder_action:
-            self.open_data_folder()
-        elif chosen == project_action:
-            self.open_project_folder()
-        elif chosen == exit_action:
-            self.request_exit()
+        self._show_context_menu(event.globalPos())
+
+    def _show_context_menu(self, position: QPoint) -> None:
+        menu = self._create_menu()
+        menu.exec(position)
+        menu.deleteLater()
 
     def refresh_data(self) -> None:
         if self.refresh_thread and self.refresh_thread.isRunning():
             return
         self._refresh_error = False
-        self.updated.setText("Refreshing...")
+        self.updated.setText("正在刷新…")
         if self.collapsed:
-            self.summary.setText("Refreshing...")
+            self.summary.setText("正在刷新…")
         self.refresh_btn.setEnabled(False)
         self.refresh_btn.setText("...")
         self.refresh_thread = RefreshThread(self.project_root, self.config)
@@ -544,9 +622,11 @@ class CodingPlanWidget(QWidget):
 
     def _refresh_failed(self, message: str) -> None:
         self._refresh_error = True
-        self.updated.setText(f"Refresh error: {sanitize_message(message, 120)}")
+        self._update_taskbar()
+        self.updated.setText("刷新失败 · 保留上次数据")
+        self.updated.setToolTip(sanitize_message(message, 120))
         if self.collapsed:
-            self.summary.setText("Refresh error")
+            self.summary.setText("刷新失败 · 保留上次数据")
 
     def _refresh_finished(self) -> None:
         self.refresh_btn.setEnabled(True)
@@ -565,6 +645,7 @@ class CodingPlanWidget(QWidget):
 
     def load_cache(self) -> None:
         usage = read_usage(self.cache_path, create_if_missing=True)
+        self._taskbar_usage = usage
         providers = usage.get("providers", {})
         codex = providers.get("codex", {})
         kimi = providers.get("kimi", {})
@@ -576,17 +657,23 @@ class CodingPlanWidget(QWidget):
         values = _remaining_values(tuple(providers.get(key, {}) for key in ("codex", "kimi") if key in visible))
         self.face.setText(_face(min(values) if values else None))
         self.last_updated_at = usage.get("updatedAt")
+        self._update_taskbar()
         self._update_summary()
         self._update_freshness()
         self._apply_collapse_state()
 
     def _update_freshness(self) -> None:
+        self._update_taskbar()
         if self.refresh_thread and self.refresh_thread.isRunning():
             return
         freshness = compute_cache_freshness(
             str(self.last_updated_at) if self.last_updated_at else None
         )
-        self.updated.setText(format_updated_with_freshness(self.last_updated_at))
+        if getattr(self, "_refresh_error", False):
+            self.updated.setText("刷新失败 · 保留上次数据")
+            return
+        self.updated.setToolTip("")
+        self.updated.setText(_localized_updated(self.last_updated_at))
         color = COLOR_DANGER if freshness.status == "Expired" else COLOR_MUTED
         self.updated.setStyleSheet(f"color: {color};")
         if self.collapsed:
@@ -614,7 +701,7 @@ class CodingPlanWidget(QWidget):
             else:
                 subprocess.Popen(["xdg-open", str(path)])
         except OSError:
-            self.updated.setText(f"Unable to open {label} folder")
+            self.updated.setText("无法打开文件夹")
 
     def closeEvent(self, event) -> None:
         self._save_state()
@@ -626,7 +713,7 @@ class CodingPlanWidget(QWidget):
         event.accept()
 
     def show_and_activate(self) -> None:
-        self.show()
+        self.showNormal()
         self.raise_()
         self.activateWindow()
 
@@ -643,6 +730,8 @@ class CodingPlanWidget(QWidget):
         self.exit_requested = True
         self.timer.stop()
         self.freshness_timer.stop()
+        if self.taskbar_strip is not None:
+            self.taskbar_strip.close()
         self._save_state()
         self.hide()
         if self.refresh_thread and self.refresh_thread.isRunning():
@@ -674,10 +763,14 @@ class CodingPlanWidget(QWidget):
                     "y": self.y(),
                     "always_on_top": self.always_on_top,
                     "collapsed": self.collapsed,
+                    "taskbar_offset": self.taskbar_strip.offset if self.taskbar_strip is not None else 0,
                 },
             )
         except OSError:
             pass
+
+    def _save_taskbar_offset(self, offset: int) -> None:
+        self._save_state()
 
 
 def run_widget(project_root: Path | None = None) -> int:
@@ -711,7 +804,7 @@ def _format_compact_summary(providers: dict[str, Any], show_reset: bool = True) 
 
     def provider_summary(provider: dict[str, Any], prefix: str) -> str:
         if provider.get("status") != "ok":
-            return f"{prefix} offline"
+            return f"{prefix} 离线"
         five = provider.get("fiveHour", {})
         weekly = provider.get("weekly", {})
         return f"{prefix} {pct(five)}/{pct(weekly)}"
@@ -724,7 +817,7 @@ def _format_compact_summary(providers: dict[str, Any], show_reset: bool = True) 
     elif deepseek.get("status") == "ok" and balance.get("total") is not None:
         parts.append(f"DS {float(balance['total']):.2f}")
     else:
-        parts.append("DS offline")
+        parts.append("DS 离线")
 
     summary = "  ".join(parts) or "暂无显示的数据源"
 

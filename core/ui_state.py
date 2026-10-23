@@ -42,6 +42,8 @@ def write_ui_state(path: Path, state: dict[str, Any]) -> None:
         clean["collapsed"] = collapsed
     elif "collapsed" not in clean:
         clean["collapsed"] = False
+    if isinstance(state.get("taskbar_offset"), int):
+        clean["taskbar_offset"] = max(0, state["taskbar_offset"])
     for key, value in state.items():
         if key not in clean:
             clean[key] = value

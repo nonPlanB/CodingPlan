@@ -2,7 +2,7 @@ app:
   refresh_interval_seconds: 180
   cache_path: data/usage.json
 ui:
-  title: Coding Energy
+  title: Coding
   theme: dark
   visible_providers:
   - codex

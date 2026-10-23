@@ -5,7 +5,7 @@ a = Analysis(
     ['app_launcher.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets\\coding_plan.ico', 'assets')],
+    datas=[('assets\\coding_plan.ico', 'assets'), ('assets\\quotabar', 'assets/quotabar')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
