@@ -24,7 +24,7 @@ def run_doctor(project_root: Path, config: dict[str, Any]) -> list[tuple[str, bo
     checks.append((".env file", True if env_path.exists() else None,
                    "found" if env_path.exists() else "optional; credentials may come from environment"))
     checks.append(("Cache writable", *_check_writable(cache_path)))
-    for key, label in (("kimi", "Kimi"), ("deepseek", "DeepSeek"), ("codex", "Codex")):
+    for key, label in (("kimi", "Kimi"), ("deepseek", "DeepSeek"), ("codex", "Codex"), ("aicodemirror", "AICodeMirror")):
         section = config.get(key, {})
         if not section.get("enabled", True):
             checks.append((f"{label} provider", None, "disabled; checks skipped"))
@@ -44,6 +44,13 @@ def run_doctor(project_root: Path, config: dict[str, Any]) -> list[tuple[str, bo
             daily_path = resolve_cache_path(project_root, section.get("daily_snapshot_path", "data/deepseek_daily.json"))
             checks.append(("DeepSeek daily snapshot", True if daily_path.exists() else None,
                            "exists" if daily_path.exists() else "created after first successful refresh"))
+        elif key == "aicodemirror":
+            from core.aicodemirror_session import session_path
+            checks.append(("AICodeMirror platform", os.name == "nt", "Windows DPAPI required"))
+            checks.append(("AICodeMirror browser", *_module_check("PySide6.QtWebEngineWidgets")))
+            found = session_path(project_root).exists()
+            checks.append(("AICodeMirror session", True if found else None,
+                           "encrypted session exists; refresh verifies it" if found else "log in via settings; password is not stored"))
         else:
             command = str(section.get("custom_command") or "").strip()
             if section.get("mode") == "custom_command" or command:

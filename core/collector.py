@@ -15,6 +15,7 @@ from core.normalizer import empty_provider
 from core.paths import project_root as project_root_func
 from core.security import sanitize_message
 from providers import CodexProvider, DeepSeekProvider, KimiProvider
+from providers.aicodemirror_provider import AICodeMirrorProvider
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "app": {
@@ -25,6 +26,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "title": "Coding Energy",
         "theme": "dark",
         "visible_providers": ["codex", "kimi", "deepseek"],
+        "taskbar_providers": None,
         "always_on_top": True,
         "opacity": 0.92,
         "width": 340,
@@ -37,6 +39,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "compact_summary_show_reset": True,
     },
     "provider": {"timeout_seconds": 15},
+    "aicodemirror": {"enabled": False, "browser_timeout_seconds": 45},
     "kimi": {"enabled": True, "command": "kimi-usage --json"},
     "codex": {"enabled": True, "mode": "auto", "custom_command": ""},
     "deepseek": {
@@ -73,6 +76,7 @@ def collect_usage(project_root: Path, config: dict[str, Any] | None = None) -> d
         CodexProvider(_provider_config(config.get("codex"), timeout_seconds), project_root),
         KimiProvider(_provider_config(config.get("kimi"), timeout_seconds), project_root),
         DeepSeekProvider(_provider_config(config.get("deepseek"), timeout_seconds), project_root),
+        AICodeMirrorProvider(_provider_config(config.get("aicodemirror"), timeout_seconds), project_root),
     )
     with ThreadPoolExecutor(max_workers=len(instances), thread_name_prefix="provider") as executor:
         futures = {provider: executor.submit(provider.collect) for provider in instances}
@@ -141,7 +145,7 @@ def _preserve_stale_values(
             )
             new_provider.update(fallback)
             new_provider["debug"] = debug
-            new_provider["message"] = "Last value shown; refresh failed."
+            new_provider["message"] = ("显示上次余额；" + str(new_provider.get("message", "刷新失败。"))) if key == "aicodemirror" else "Last value shown; refresh failed."
     return new_usage
 
 
@@ -156,6 +160,8 @@ def _provider_fallback_values(old_provider: dict[str, Any]) -> dict[str, Any] | 
     balance = old_provider.get("balance")
     if isinstance(balance, dict) and balance.get("total") is not None:
         result["balance"] = balance
+        if old_provider.get("lastSuccessAt"):
+            result["lastSuccessAt"] = old_provider["lastSuccessAt"]
     today = old_provider.get("today")
     if isinstance(today, dict) and today.get("estimatedSpend") is not None:
         result["today"] = today

@@ -10,7 +10,7 @@ from pathlib import Path
 import sys
 
 from PySide6.QtCore import QElapsedTimer, QPoint, QRectF, QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QCursor, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QCursor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QHBoxLayout, QToolTip, QWidget
 
 from core.time_display import format_reset_time
@@ -25,7 +25,7 @@ def quota_percent(window):
 
 def logo_path(key: str, light: bool) -> Path:
     name = "kimi-dark" if key == "kimi" and not light else key
-    relative = Path("assets") / "quotabar" / f"{name}.png"
+    relative = Path("assets") / "quotabar" / f"{name}.{'ico' if key == 'aicodemirror' else 'png'}"
     external = Path(sys.executable).resolve().parent / relative if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1] / relative
     if external.exists():
         return external
@@ -52,10 +52,10 @@ class QuotaRing(QWidget):
         self.five_hour = quota_percent(data.get("fiveHour"))
         self.stale = stale or data.get("status") != "ok"
         if self.logo.isNull() or self.property("logo_key") != (key, light):
-            self.logo = QPixmap(str(logo_path(key, light)))
+            self.logo = QIcon(str(logo_path(key, light))).pixmap(64, 64)
             self.setProperty("logo_key", (key, light))
         self.light = light
-        name = {"codex": "Codex", "kimi": "Kimi", "deepseek": "DeepSeek"}.get(key, key)
+        name = {"codex": "Codex", "kimi": "Kimi", "deepseek": "DeepSeek", "aicodemirror": "AICodeMirror"}.get(key, key)
         def percent(value):
             return "--" if value is None else f"{value:g}%"
         description = name
@@ -66,7 +66,7 @@ class QuotaRing(QWidget):
             if reset == "soon":
                 reset = "即将重置"
             description += f"\n{label}剩余量：{percent(value)} · 重置时间：{reset}"
-        if key == "deepseek":
+        if key in ("deepseek", "aicodemirror"):
             balance = data.get("balance") or {}
             description = f"{name}\n剩余余额：{balance.get('currency') or ''} {balance.get('total', '--')}\n重置时间：不适用（无周/5H限额）"
         if self.stale:
@@ -166,7 +166,7 @@ class TaskbarQuotaStrip(QWidget):
         layout.setContentsMargins(2, 0, 2, 0)
         layout.setSpacing(4)
         self.rings = []
-        for _ in range(3):
+        for _ in range(4):
             ring = QuotaRing(self)
             layout.addWidget(ring)
             self.rings.append(ring)

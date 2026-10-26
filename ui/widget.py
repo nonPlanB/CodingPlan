@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from copy import deepcopy
 import subprocess
 import sys
@@ -31,6 +32,7 @@ from core.freshness import compute_cache_freshness, format_updated_with_freshnes
 from core.time_display import format_reset_time
 from core.paths import application_icon_path, data_path, project_root as project_root_func
 from core.security import sanitize_message
+from core.provider_visibility import taskbar_provider_keys
 from core.ui_state import read_ui_state, write_ui_state
 from ui.settings import SettingsDialog
 from ui.taskbar import TaskbarQuotaStrip, logo_path
@@ -128,7 +130,7 @@ class ProviderCard(QFrame):
         return widget
 
     def update_data(self, data: dict[str, Any]) -> None:
-        self.logo.setPixmap(QPixmap(str(logo_path(self.provider_key, self.light))).scaled(
+        self.logo.setPixmap(QIcon(str(logo_path(self.provider_key, self.light))).pixmap(64, 64).scaled(
             24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         status = data.get("status", "error")
         self.status.setText({"ok": "● 已同步", "offline": "离线", "error": "异常", "unsupported": "未启用 / 未配置"}.get(status, str(status)))
@@ -187,6 +189,30 @@ class DeepSeekCard(ProviderCard):
         color = self._color(100 if status == "ok" else None, status)
         self.bal.setStyleSheet(f"color: {color};")
         self.today.setStyleSheet(f"color: {color};")
+
+
+class AICodeMirrorCard(ProviderCard):
+    def _setup_rows(self, layout):
+        self.bal = self._row("BAL", layout)
+        self.row_names["BAL"].setText("按量付费余额")
+        self.timestamp = QLabel("尚未同步")
+        self.timestamp.setObjectName("resetTime")
+        layout.addWidget(self.timestamp)
+
+    def _update_rows(self, data, status):
+        balance = data.get("balance") or {}
+        value = balance.get("total")
+        text = balance.get("display") or (f"¥{value:.3f}" if value is not None else "--")
+        self.bal.setText(text + (" · 已过期" if value is not None and status != "ok" else ""))
+        self.bal.setStyleSheet(f"color: {self._color(100 if status == 'ok' else None, status)};")
+        stamp = data.get("lastSuccessAt")
+        try:
+            success_time = datetime.fromisoformat(stamp).astimezone().strftime("%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            success_time = "--"
+        self.timestamp.setText("上次成功：" + success_time)
+        info = data.get("sessionInfo") or {}
+        self.timestamp.setToolTip("已验证保存会话可恢复" if info.get("restoredSessionVerified") else "登录会话将在下一次刷新时验证恢复")
 
 
 class CodingPlanWidget(QWidget):
@@ -308,9 +334,11 @@ class CodingPlanWidget(QWidget):
         self.codex_card = ProviderCard("Codex")
         self.kimi_card = ProviderCard("Kimi")
         self.deepseek_card = DeepSeekCard("DeepSeek")
+        self.aicodemirror_card = AICodeMirrorCard("AICodeMirror")
         cards_layout.addWidget(self.codex_card)
         cards_layout.addWidget(self.kimi_card)
         cards_layout.addWidget(self.deepseek_card)
+        cards_layout.addWidget(self.aicodemirror_card)
         self.empty_label = QLabel("暂无显示的数据源，请在设置中选择。")
         self.empty_label.setObjectName("message")
         self.empty_label.setWordWrap(True)
@@ -361,7 +389,7 @@ class CodingPlanWidget(QWidget):
 
     def _apply_provider_visibility(self) -> None:
         visible = self.config["ui"].get("visible_providers", ["codex", "kimi", "deepseek"])
-        for key, card in (("codex", self.codex_card), ("kimi", self.kimi_card), ("deepseek", self.deepseek_card)):
+        for key, card in (("codex", self.codex_card), ("kimi", self.kimi_card), ("deepseek", self.deepseek_card), ("aicodemirror", self.aicodemirror_card)):
             card.setVisible(key in visible)
             card.show_reset = self.config["ui"].get("show_reset_times", True)
             card.light = self.config["ui"].get("theme") == "light"
@@ -372,6 +400,7 @@ class CodingPlanWidget(QWidget):
         config["ui"]["always_on_top"] = self.always_on_top
         dialog = SettingsDialog(self.project_root, config, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
+            self.load_cache()  # Local logout also takes effect when settings are cancelled.
             return
         self.config = dialog.config
         ui = self.config["ui"]
@@ -432,20 +461,20 @@ class CodingPlanWidget(QWidget):
         return menu
 
     def _update_taskbar(self) -> None:
-        visible = self.config["ui"].get("visible_providers", ["codex", "kimi", "deepseek"])
+        visible = taskbar_provider_keys(self.config)
         freshness = compute_cache_freshness(
             str(self.last_updated_at) if self.last_updated_at else None
         )
         stale = freshness.status != "Fresh" or getattr(self, "_refresh_error", False)
         providers = self._taskbar_usage.get("providers", {})
         parts = []
-        for key, name in (("codex", "Codex"), ("kimi", "Kimi"), ("deepseek", "DeepSeek")):
+        for key, name in (("codex", "Codex"), ("kimi", "Kimi"), ("deepseek", "DeepSeek"), ("aicodemirror", "AICodeMirror")):
             if key not in visible:
                 continue
             provider = providers.get(key, {})
             status = provider.get("status", "error")
             suffix = " [过期]" if stale or status != "ok" else ""
-            if key == "deepseek":
+            if key in ("deepseek", "aicodemirror"):
                 balance = provider.get("balance") or {}
                 value = balance.get("total")
                 if isinstance(value, (int, float)):
@@ -466,7 +495,7 @@ class CodingPlanWidget(QWidget):
         title = " | ".join(parts) or "暂无显示的数据源"
         if self.taskbar_strip is not None:
             self.taskbar_strip.update_quotas(
-                {key: providers.get(key, {}) for key in ("codex", "kimi", "deepseek") if key in visible},
+                {key: providers.get(key, {}) for key in ("codex", "kimi", "deepseek", "aicodemirror") if key in visible},
                 stale, self.config["ui"].get("theme") == "light",
                 _localized_updated(self.last_updated_at).replace("更新于 ", "更新时间："))
         self.setWindowTitle(f"{self.config['ui'].get('title', 'Coding Energy')} | {title}")
@@ -639,6 +668,7 @@ class CodingPlanWidget(QWidget):
         self.codex_card.update_data(codex)
         self.kimi_card.update_data(kimi)
         self.deepseek_card.update_data(deepseek)
+        self.aicodemirror_card.update_data(providers.get("aicodemirror", {}))
         visible = self.config["ui"].get("visible_providers", ["codex", "kimi", "deepseek"])
         values = _remaining_values(tuple(providers.get(key, {}) for key in ("codex", "kimi") if key in visible))
         self.face.setText(_face(min(values) if values else None))
@@ -796,6 +826,14 @@ def _format_compact_summary(providers: dict[str, Any], show_reset: bool = True) 
         parts.append(f"DS {float(balance['total']):.2f}")
     else:
         parts.append("DS 离线")
+
+    if "aicodemirror" in providers:
+        mirror = providers["aicodemirror"]
+        balance = mirror.get("balance") or {}
+        if balance.get("total") is not None:
+            parts.append(f"ACM {balance['total']:.2f}" + (" 过期" if mirror.get("status") != "ok" else ""))
+        else:
+            parts.append("ACM --")
 
     summary = "  ".join(parts) or "暂无显示的数据源"
 

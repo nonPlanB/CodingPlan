@@ -6,6 +6,9 @@ ui:
   theme: light
   visible_providers:
   - codex
+  - aicodemirror
+  taskbar_providers:
+  - codex
   always_on_top: true
   opacity: 0.9
   width: 360
@@ -18,6 +21,9 @@ ui:
   compact_summary_show_reset: true
 provider:
   timeout_seconds: 15
+aicodemirror:
+  enabled: true
+  browser_timeout_seconds: 45
 kimi:
   enabled: false
   command: kimi-usage --json

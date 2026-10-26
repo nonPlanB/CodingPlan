@@ -16,12 +16,19 @@ from core.time_display import format_reset_time
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Codex, Kimi and DeepSeek Coding Plan desktop widget")
-    parser.add_argument("command", choices=("doctor", "status", "refresh", "widget"))
+    parser.add_argument("command", choices=("doctor", "status", "refresh", "widget", "aicodemirror-browser"))
+    parser.add_argument("--browser-mode", choices=("login", "query"), default="login", help=argparse.SUPPRESS)
+    parser.add_argument("--browser-root", help=argparse.SUPPRESS)
+    parser.add_argument("--browser-timeout", type=float, default=30, help=argparse.SUPPRESS)
     return parser
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "aicodemirror-browser":
+        from pathlib import Path
+        from ui.aicodemirror_browser import run_browser
+        return run_browser(Path(args.browser_root) if args.browser_root else project_root(), args.browser_mode, args.browser_timeout)
     root = project_root()
     config = load_config(root)
     if args.command == "doctor":
@@ -49,10 +56,10 @@ def main(argv=None) -> int:
 def format_status(usage: dict[str, Any]) -> str:
     lines = ["CODING PLAN WIDGET", ""]
     providers = usage.get("providers", {})
-    for key, label in (("codex", "Codex"), ("kimi", "Kimi"), ("deepseek", "DeepSeek")):
+    for key, label in (("codex", "Codex"), ("kimi", "Kimi"), ("deepseek", "DeepSeek"), ("aicodemirror", "AICodeMirror")):
         provider = providers.get(key, {})
         lines.append(label)
-        if key == "deepseek":
+        if key in ("deepseek", "aicodemirror"):
             balance = provider.get("balance") or {}
             today = provider.get("today") or {}
             if balance.get("total") is not None:
