@@ -3,7 +3,7 @@ app:
   cache_path: data/usage.json
 ui:
   title: Coding
-  theme: dark
+  theme: light
   visible_providers:
   - codex
   always_on_top: true

@@ -21,7 +21,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QPushButton,
     QSizePolicy,
-    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
@@ -203,7 +202,6 @@ class CodingPlanWidget(QWidget):
         self.exit_requested = False
         self.last_updated_at: Any = None
         self._taskbar_usage: dict[str, Any] = {}
-        self.tray_icon: QSystemTrayIcon | None = None
         saved_state = read_ui_state(self.state_path)
         self.taskbar_strip = TaskbarQuotaStrip(saved_state.get("taskbar_offset", 0)) if os.name == "nt" else None
         if self.taskbar_strip is not None:
@@ -231,7 +229,7 @@ class CodingPlanWidget(QWidget):
         self._apply_flags()
         self._build_ui()
         self._apply_style()
-        self._setup_tray()
+        self._setup_application_icon()
         self._restore_position(saved_state)
         self.load_cache()
 
@@ -250,8 +248,6 @@ class CodingPlanWidget(QWidget):
         if self.always_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
-        if hasattr(self, "tray_top_action"):
-            self.tray_top_action.setChecked(self.always_on_top)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -289,7 +285,7 @@ class CodingPlanWidget(QWidget):
         self.hide_btn = QPushButton("—")
         self.hide_btn.setObjectName("iconButton")
         self.hide_btn.setFixedSize(24, 26)
-        self.hide_btn.setToolTip("隐藏主窗口（托盘和环形组件继续显示）")
+        self.hide_btn.setToolTip("隐藏主窗口（任务栏环形组件继续显示）")
         self.hide_btn.setAccessibleName("隐藏主窗口")
         self.hide_btn.clicked.connect(self.hide)
         header.addWidget(self.hide_btn)
@@ -401,20 +397,10 @@ class CodingPlanWidget(QWidget):
         else:
             self.refresh_data()
 
-    def _setup_tray(self) -> None:
+    def _setup_application_icon(self) -> None:
         icon = self._application_icon()
         QApplication.instance().setWindowIcon(icon)
         self.setWindowIcon(icon)
-        if not QSystemTrayIcon.isSystemTrayAvailable():
-            return
-        tray = QSystemTrayIcon(icon, self)
-        tray.setToolTip("CodingPlanWidget")
-        menu = self._create_menu()
-        self.tray_top_action = menu.top_action
-        tray.activated.connect(self._tray_activated)
-        tray.setContextMenu(menu)
-        tray.show()
-        self.tray_icon = tray
 
     def _create_menu(self) -> QMenu:
         menu = QMenu(self)
@@ -481,10 +467,10 @@ class CodingPlanWidget(QWidget):
         if self.taskbar_strip is not None:
             self.taskbar_strip.update_quotas(
                 {key: providers.get(key, {}) for key in ("codex", "kimi", "deepseek") if key in visible},
-                stale, self.config["ui"].get("theme") == "light")
+                stale, self.config["ui"].get("theme") == "light",
+                _localized_updated(self.last_updated_at).replace("更新于 ", "更新时间："))
         self.setWindowTitle(f"{self.config['ui'].get('title', 'Coding Energy')} | {title}")
-        if self.tray_icon is not None:
-            self.tray_icon.setToolTip(f"{self.windowTitle()}\n{_localized_updated(self.last_updated_at)}")
+
     def _application_icon(self) -> QIcon:
         icon_path = application_icon_path()
         if icon_path.exists():
@@ -705,7 +691,7 @@ class CodingPlanWidget(QWidget):
 
     def closeEvent(self, event) -> None:
         self._save_state()
-        if self.tray_icon is not None and not self.exit_requested:
+        if self.taskbar_strip is not None and self.taskbar_strip.isVisible() and not self.exit_requested:
             self.hide()
             event.ignore()
             return
@@ -716,13 +702,6 @@ class CodingPlanWidget(QWidget):
         self.showNormal()
         self.raise_()
         self.activateWindow()
-
-    def _tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
-        if reason in (
-            QSystemTrayIcon.ActivationReason.Trigger,
-            QSystemTrayIcon.ActivationReason.DoubleClick,
-        ):
-            self.show_and_activate()
 
     def request_exit(self) -> None:
         if self.exit_requested:
@@ -740,8 +719,6 @@ class CodingPlanWidget(QWidget):
         self._finish_exit()
 
     def _finish_exit(self) -> None:
-        if self.tray_icon is not None:
-            self.tray_icon.hide()
         QApplication.quit()
 
     def _restore_position(self, state: dict[str, Any]) -> None:
@@ -775,7 +752,8 @@ class CodingPlanWidget(QWidget):
 
 def run_widget(project_root: Path | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(not QSystemTrayIcon.isSystemTrayAvailable())
+    # closeEvent and the shared menu control shutdown, including worker cleanup.
+    app.setQuitOnLastWindowClosed(False)
     widget = CodingPlanWidget(project_root)
     widget.show()
     return app.exec()

@@ -9,9 +9,11 @@ from ctypes import wintypes
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import QPoint, QRectF, QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QHBoxLayout, QWidget
+from PySide6.QtCore import QElapsedTimer, QPoint, QRectF, QSize, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QCursor, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QHBoxLayout, QToolTip, QWidget
+
+from core.time_display import format_reset_time
 
 
 def quota_percent(window):
@@ -36,6 +38,7 @@ class QuotaRing(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedSize(40, 40)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.key = ""
         self.weekly = self.five_hour = None
@@ -55,10 +58,17 @@ class QuotaRing(QWidget):
         name = {"codex": "Codex", "kimi": "Kimi", "deepseek": "DeepSeek"}.get(key, key)
         def percent(value):
             return "--" if value is None else f"{value:g}%"
-        description = f"{name}：5H 剩余 {percent(self.five_hour)}；周剩余 {percent(self.weekly)}"
+        description = name
+        for field, label, value in (("fiveHour", "5 小时", self.five_hour),
+                                    ("weekly", "每周", self.weekly)):
+            window = data.get(field) or {}
+            reset = format_reset_time(window.get("resetAt")) if isinstance(window, dict) else "--"
+            if reset == "soon":
+                reset = "即将重置"
+            description += f"\n{label}剩余量：{percent(value)} · 重置时间：{reset}"
         if key == "deepseek":
             balance = data.get("balance") or {}
-            description = f"{name}：余额 {balance.get('currency', '')} {balance.get('total', '--')}；无周/5H限额"
+            description = f"{name}\n剩余余额：{balance.get('currency') or ''} {balance.get('total', '--')}\n重置时间：不适用（无周/5H限额）"
         if self.stale:
             description += "（数据过期或刷新失败）"
         self.setAccessibleName(description)
@@ -77,9 +87,6 @@ class QuotaRing(QWidget):
         painter = QPainter(self)
         painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
         painter.scale(self.width() / 64, self.height() / 64)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#edf2fa" if self.light else "#141414"))
-        painter.drawRoundedRect(QRectF(0, 0, 64, 64), 12, 12)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         for bounds, value, weekly in ((QRectF(5, 5, 54, 54), self.five_hour, False),
                                        (QRectF(11, 11, 42, 42), self.weekly, True)):
@@ -152,6 +159,8 @@ class TaskbarQuotaStrip(QWidget):
                             | Qt.WindowType.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # This strip never takes focus; Qt otherwise suppresses its tooltips.
+        self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips)
         self.setWindowTitle("Coding Energy 任务栏额度")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(2, 0, 2, 0)
@@ -161,20 +170,50 @@ class TaskbarQuotaStrip(QWidget):
             ring = QuotaRing(self)
             layout.addWidget(ring)
             self.rings.append(ring)
-        self.setToolTip("点击恢复窗口；左右拖动调整任务栏位置")
+        self.setToolTip("暂无额度数据")
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.reposition)
         self.timer.start(1000)
+        # Windows can route mouse events through fully transparent pixels.
+        # Check the whole strip so hovering between the rings also works.
+        self._hover_elapsed = QElapsedTimer()
+        self._tooltip_shown = False
+        self.hover_timer = QTimer(self)
+        self.hover_timer.timeout.connect(self._check_hover)
+        self.hover_timer.start(100)
 
-    def update_quotas(self, providers: dict, stale: bool, light: bool):
+    def _check_hover(self):
+        position = QCursor.pos()
+        hovering = (self.isVisible() and self._drag_start is None
+                    and self.rect().contains(self.mapFromGlobal(position)))
+        if not hovering:
+            self._reset_hover()
+            return
+        if not self._hover_elapsed.isValid():
+            self._hover_elapsed.start()
+        elif self._hover_elapsed.elapsed() >= 500 and not self._tooltip_shown:
+            QToolTip.showText(position, self.toolTip(), self)
+            self._tooltip_shown = True
+
+    def _reset_hover(self):
+        self._hover_elapsed.invalidate()
+        if self._tooltip_shown:
+            QToolTip.hideText()
+            self._tooltip_shown = False
+
+    def hideEvent(self, event):
+        self._reset_hover()
+        super().hideEvent(event)
+
+    def update_quotas(self, providers: dict, stale: bool, light: bool, updated_text: str = "更新时间：--"):
         items = list(providers.items())[:len(self.rings)]
         for index, ring in enumerate(self.rings):
             ring.setVisible(index < len(items))
             if index < len(items):
                 key, data = items[index]
                 ring.set_reading(key, data, stale, light)
-        self.setToolTip("\n".join(ring.accessibleName() for ring in self.rings[:len(items)])
-                        + "\n点击恢复窗口；左右拖动调整位置")
+        self.setToolTip("\n".join(
+            [ring.accessibleName() for ring in self.rings[:len(items)]] + [updated_text]))
         self._has_data = bool(items)
         self.reposition()
 
@@ -259,6 +298,8 @@ class TaskbarQuotaStrip(QWidget):
 
     def closeEvent(self, event):
         self.timer.stop()
+        self.hover_timer.stop()
+        self._reset_hover()
         super().closeEvent(event)
 
     def contextMenuEvent(self, event):
