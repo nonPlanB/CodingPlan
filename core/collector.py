@@ -16,6 +16,7 @@ from core.paths import project_root as project_root_func
 from core.security import sanitize_message
 from providers import CodexProvider, DeepSeekProvider, KimiProvider
 from providers.aicodemirror_provider import AICodeMirrorProvider
+from providers.relayrouter_provider import RelayRouterProvider
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "app": {
@@ -40,6 +41,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "provider": {"timeout_seconds": 15},
     "aicodemirror": {"enabled": False, "browser_timeout_seconds": 45},
+    "relayrouter": {"enabled": False, "refresh_interval_seconds": 300, "use_system_proxy": False},
     "kimi": {"enabled": True, "command": "kimi-usage --json"},
     "codex": {"enabled": True, "mode": "auto", "custom_command": ""},
     "deepseek": {
@@ -68,7 +70,7 @@ def load_config(project_root: Path | None = None) -> dict[str, Any]:
     return _deep_merge(DEFAULT_CONFIG, data)
 
 
-def collect_usage(project_root: Path, config: dict[str, Any] | None = None) -> dict[str, Any]:
+def collect_usage(project_root: Path, config: dict[str, Any] | None = None, *, force=False) -> dict[str, Any]:
     config = config or load_config(project_root)
     providers: dict[str, dict[str, Any]] = {}
     timeout_seconds = _timeout_seconds(config)
@@ -77,6 +79,8 @@ def collect_usage(project_root: Path, config: dict[str, Any] | None = None) -> d
         KimiProvider(_provider_config(config.get("kimi"), timeout_seconds), project_root),
         DeepSeekProvider(_provider_config(config.get("deepseek"), timeout_seconds), project_root),
         AICodeMirrorProvider(_provider_config(config.get("aicodemirror"), timeout_seconds), project_root),
+        RelayRouterProvider(_provider_config(config.get("relayrouter"), timeout_seconds), project_root,
+                            force=force, cache_path=resolve_cache_path(project_root, config["app"]["cache_path"])),
     )
     with ThreadPoolExecutor(max_workers=len(instances), thread_name_prefix="provider") as executor:
         futures = {provider: executor.submit(provider.collect) for provider in instances}
@@ -138,6 +142,9 @@ def _preserve_stale_values(
         old_provider = old_providers.get(key)
         if not isinstance(old_provider, dict):
             continue
+        if key == "relayrouter" and (not new_provider.get("credentialRevision") or
+                new_provider.get("credentialRevision") != old_provider.get("credentialRevision")):
+            continue  # Never show a previous account's balance after credentials change.
         fallback = _provider_fallback_values(old_provider)
         if fallback:
             debug = sanitize_message(
@@ -145,7 +152,7 @@ def _preserve_stale_values(
             )
             new_provider.update(fallback)
             new_provider["debug"] = debug
-            new_provider["message"] = ("显示上次余额；" + str(new_provider.get("message", "刷新失败。"))) if key == "aicodemirror" else "Last value shown; refresh failed."
+            new_provider["message"] = ("显示上次余额；" + str(new_provider.get("message", "刷新失败。"))) if key in ("aicodemirror", "relayrouter") else "Last value shown; refresh failed."
     return new_usage
 
 

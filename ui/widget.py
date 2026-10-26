@@ -55,14 +55,15 @@ class RefreshThread(QThread):
     completed = Signal()
     failed = Signal(str)
 
-    def __init__(self, project_root: Path, config: dict[str, Any]) -> None:
+    def __init__(self, project_root: Path, config: dict[str, Any], force=False) -> None:
         super().__init__()
         self.project_root = project_root
         self.config = config
+        self.force = force
 
     def run(self) -> None:
         try:
-            collect_usage(self.project_root, self.config)
+            collect_usage(self.project_root, self.config, force=self.force)
         except Exception as exc:
             self.failed.emit(sanitize_message(exc))
         else:
@@ -192,9 +193,12 @@ class DeepSeekCard(ProviderCard):
 
 
 class AICodeMirrorCard(ProviderCard):
+    balance_label = "按量付费余额"
+    currency_symbol = "¥"
+
     def _setup_rows(self, layout):
         self.bal = self._row("BAL", layout)
-        self.row_names["BAL"].setText("按量付费余额")
+        self.row_names["BAL"].setText(self.balance_label)
         self.timestamp = QLabel("尚未同步")
         self.timestamp.setObjectName("resetTime")
         layout.addWidget(self.timestamp)
@@ -202,7 +206,7 @@ class AICodeMirrorCard(ProviderCard):
     def _update_rows(self, data, status):
         balance = data.get("balance") or {}
         value = balance.get("total")
-        text = balance.get("display") or (f"¥{value:.3f}" if value is not None else "--")
+        text = balance.get("display") or (f"{self.currency_symbol}{value:.3f}" if value is not None else "--")
         self.bal.setText(text + (" · 已过期" if value is not None and status != "ok" else ""))
         self.bal.setStyleSheet(f"color: {self._color(100 if status == 'ok' else None, status)};")
         stamp = data.get("lastSuccessAt")
@@ -213,6 +217,17 @@ class AICodeMirrorCard(ProviderCard):
         self.timestamp.setText("上次成功：" + success_time)
         info = data.get("sessionInfo") or {}
         self.timestamp.setToolTip("已验证保存会话可恢复" if info.get("restoredSessionVerified") else "登录会话将在下一次刷新时验证恢复")
+
+
+class RelayRouterCard(AICodeMirrorCard):
+    balance_label = "账户余额（美元）"
+    currency_symbol = "$"
+
+    def _update_rows(self, data, status):
+        super()._update_rows(data, status)
+        value = (data.get("balance") or {}).get("total")
+        self.bal.setToolTip(f"精确余额：USD {value:.6f}" if value is not None else "")
+        self.timestamp.setToolTip("通过账户管理接口查询，不调用模型。")
 
 
 class CodingPlanWidget(QWidget):
@@ -305,7 +320,7 @@ class CodingPlanWidget(QWidget):
         self.refresh_btn.setFlat(True)
         self.refresh_btn.setFixedSize(38, 28)
         self.refresh_btn.setToolTip("立即刷新额度")
-        self.refresh_btn.clicked.connect(self.refresh_data)
+        self.refresh_btn.clicked.connect(lambda: self.refresh_data(force=True))
         header.addWidget(self.refresh_btn)
 
         self.hide_btn = QPushButton("—")
@@ -335,10 +350,12 @@ class CodingPlanWidget(QWidget):
         self.kimi_card = ProviderCard("Kimi")
         self.deepseek_card = DeepSeekCard("DeepSeek")
         self.aicodemirror_card = AICodeMirrorCard("AICodeMirror")
+        self.relayrouter_card = RelayRouterCard("RelayRouter")
         cards_layout.addWidget(self.codex_card)
         cards_layout.addWidget(self.kimi_card)
         cards_layout.addWidget(self.deepseek_card)
         cards_layout.addWidget(self.aicodemirror_card)
+        cards_layout.addWidget(self.relayrouter_card)
         self.empty_label = QLabel("暂无显示的数据源，请在设置中选择。")
         self.empty_label.setObjectName("message")
         self.empty_label.setWordWrap(True)
@@ -389,7 +406,7 @@ class CodingPlanWidget(QWidget):
 
     def _apply_provider_visibility(self) -> None:
         visible = self.config["ui"].get("visible_providers", ["codex", "kimi", "deepseek"])
-        for key, card in (("codex", self.codex_card), ("kimi", self.kimi_card), ("deepseek", self.deepseek_card), ("aicodemirror", self.aicodemirror_card)):
+        for key, card in (("codex", self.codex_card), ("kimi", self.kimi_card), ("deepseek", self.deepseek_card), ("aicodemirror", self.aicodemirror_card), ("relayrouter", self.relayrouter_card)):
             card.setVisible(key in visible)
             card.show_reset = self.config["ui"].get("show_reset_times", True)
             card.light = self.config["ui"].get("theme") == "light"
@@ -424,7 +441,7 @@ class CodingPlanWidget(QWidget):
         if self.refresh_thread and self.refresh_thread.isRunning():
             self._refresh_pending = True
         else:
-            self.refresh_data()
+            self.refresh_data(force=True)
 
     def _setup_application_icon(self) -> None:
         icon = self._application_icon()
@@ -452,7 +469,7 @@ class CodingPlanWidget(QWidget):
         exit_action = menu.addAction("退出程序")
         show_action.triggered.connect(self.show_and_activate)
         hide_action.triggered.connect(self.hide)
-        refresh_action.triggered.connect(self.refresh_data)
+        refresh_action.triggered.connect(lambda: self.refresh_data(force=True))
         settings_action.triggered.connect(self.open_settings)
         data_action.triggered.connect(self.open_data_folder)
         project_action.triggered.connect(self.open_project_folder)
@@ -468,13 +485,13 @@ class CodingPlanWidget(QWidget):
         stale = freshness.status != "Fresh" or getattr(self, "_refresh_error", False)
         providers = self._taskbar_usage.get("providers", {})
         parts = []
-        for key, name in (("codex", "Codex"), ("kimi", "Kimi"), ("deepseek", "DeepSeek"), ("aicodemirror", "AICodeMirror")):
+        for key, name in (("codex", "Codex"), ("kimi", "Kimi"), ("deepseek", "DeepSeek"), ("aicodemirror", "AICodeMirror"), ("relayrouter", "RelayRouter")):
             if key not in visible:
                 continue
             provider = providers.get(key, {})
             status = provider.get("status", "error")
             suffix = " [过期]" if stale or status != "ok" else ""
-            if key in ("deepseek", "aicodemirror"):
+            if key in ("deepseek", "aicodemirror", "relayrouter"):
                 balance = provider.get("balance") or {}
                 value = balance.get("total")
                 if isinstance(value, (int, float)):
@@ -495,7 +512,7 @@ class CodingPlanWidget(QWidget):
         title = " | ".join(parts) or "暂无显示的数据源"
         if self.taskbar_strip is not None:
             self.taskbar_strip.update_quotas(
-                {key: providers.get(key, {}) for key in ("codex", "kimi", "deepseek", "aicodemirror") if key in visible},
+                {key: providers.get(key, {}) for key in ("codex", "kimi", "deepseek", "aicodemirror", "relayrouter") if key in visible},
                 stale, self.config["ui"].get("theme") == "light",
                 _localized_updated(self.last_updated_at).replace("更新于 ", "更新时间："))
         self.setWindowTitle(f"{self.config['ui'].get('title', 'Coding Energy')} | {title}")
@@ -620,7 +637,7 @@ class CodingPlanWidget(QWidget):
         menu.exec(position)
         menu.deleteLater()
 
-    def refresh_data(self) -> None:
+    def refresh_data(self, force=False) -> None:
         if self.refresh_thread and self.refresh_thread.isRunning():
             return
         self._refresh_error = False
@@ -629,7 +646,7 @@ class CodingPlanWidget(QWidget):
             self.summary.setText("正在刷新…")
         self.refresh_btn.setEnabled(False)
         self.refresh_btn.setText("...")
-        self.refresh_thread = RefreshThread(self.project_root, self.config)
+        self.refresh_thread = RefreshThread(self.project_root, self.config, force=force)
         self.refresh_thread.completed.connect(self.load_cache)
         self.refresh_thread.failed.connect(self._refresh_failed)
         self.refresh_thread.finished.connect(self._refresh_finished)
@@ -656,7 +673,7 @@ class CodingPlanWidget(QWidget):
             self._finish_exit()
         elif self._refresh_pending:
             self._refresh_pending = False
-            self.refresh_data()
+            self.refresh_data(force=True)
 
     def load_cache(self) -> None:
         usage = read_usage(self.cache_path, create_if_missing=True)
@@ -669,6 +686,7 @@ class CodingPlanWidget(QWidget):
         self.kimi_card.update_data(kimi)
         self.deepseek_card.update_data(deepseek)
         self.aicodemirror_card.update_data(providers.get("aicodemirror", {}))
+        self.relayrouter_card.update_data(providers.get("relayrouter", {}))
         visible = self.config["ui"].get("visible_providers", ["codex", "kimi", "deepseek"])
         values = _remaining_values(tuple(providers.get(key, {}) for key in ("codex", "kimi") if key in visible))
         self.face.setText(_face(min(values) if values else None))
@@ -834,6 +852,12 @@ def _format_compact_summary(providers: dict[str, Any], show_reset: bool = True) 
             parts.append(f"ACM {balance['total']:.2f}" + (" 过期" if mirror.get("status") != "ok" else ""))
         else:
             parts.append("ACM --")
+
+    if "relayrouter" in providers:
+        relay = providers["relayrouter"]
+        balance = relay.get("balance") or {}
+        value = balance.get("total")
+        parts.append((f"RR ${value:.2f}" + (" 过期" if relay.get("status") != "ok" else "")) if value is not None else "RR --")
 
     summary = "  ".join(parts) or "暂无显示的数据源"
 

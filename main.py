@@ -35,7 +35,7 @@ def main(argv=None) -> int:
         print(format_doctor(run_doctor(root, config)))
         return 0
     if args.command == "refresh":
-        usage = collect_usage(root, config)
+        usage = collect_usage(root, config, force=True)
         print(format_status(usage))
         return 0
     if args.command == "status":
@@ -56,10 +56,10 @@ def main(argv=None) -> int:
 def format_status(usage: dict[str, Any]) -> str:
     lines = ["CODING PLAN WIDGET", ""]
     providers = usage.get("providers", {})
-    for key, label in (("codex", "Codex"), ("kimi", "Kimi"), ("deepseek", "DeepSeek"), ("aicodemirror", "AICodeMirror")):
+    for key, label in (("codex", "Codex"), ("kimi", "Kimi"), ("deepseek", "DeepSeek"), ("aicodemirror", "AICodeMirror"), ("relayrouter", "RelayRouter")):
         provider = providers.get(key, {})
         lines.append(label)
-        if key in ("deepseek", "aicodemirror"):
+        if key in ("deepseek", "aicodemirror", "relayrouter"):
             balance = provider.get("balance") or {}
             today = provider.get("today") or {}
             if balance.get("total") is not None:

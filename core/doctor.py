@@ -24,7 +24,7 @@ def run_doctor(project_root: Path, config: dict[str, Any]) -> list[tuple[str, bo
     checks.append((".env file", True if env_path.exists() else None,
                    "found" if env_path.exists() else "optional; credentials may come from environment"))
     checks.append(("Cache writable", *_check_writable(cache_path)))
-    for key, label in (("kimi", "Kimi"), ("deepseek", "DeepSeek"), ("codex", "Codex"), ("aicodemirror", "AICodeMirror")):
+    for key, label in (("kimi", "Kimi"), ("deepseek", "DeepSeek"), ("codex", "Codex"), ("aicodemirror", "AICodeMirror"), ("relayrouter", "RelayRouter")):
         section = config.get(key, {})
         if not section.get("enabled", True):
             checks.append((f"{label} provider", None, "disabled; checks skipped"))
@@ -44,6 +44,14 @@ def run_doctor(project_root: Path, config: dict[str, Any]) -> list[tuple[str, bo
             daily_path = resolve_cache_path(project_root, section.get("daily_snapshot_path", "data/deepseek_daily.json"))
             checks.append(("DeepSeek daily snapshot", True if daily_path.exists() else None,
                            "exists" if daily_path.exists() else "created after first successful refresh"))
+        elif key == "relayrouter":
+            from core.relayrouter_credentials import load_credentials
+            try:
+                found = load_credentials(project_root) is not None
+                checks.append(("RelayRouter credentials", True if found else None,
+                               "encrypted credentials loaded; refresh verifies them" if found else "configure user ID and identity token in settings"))
+            except ValueError:
+                checks.append(("RelayRouter credentials", False, "cannot decrypt; save credentials again in settings"))
         elif key == "aicodemirror":
             from core.aicodemirror_session import session_path
             checks.append(("AICodeMirror platform", os.name == "nt", "Windows DPAPI required"))

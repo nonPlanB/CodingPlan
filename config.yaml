@@ -7,6 +7,7 @@ ui:
   visible_providers:
   - codex
   - aicodemirror
+  - relayrouter
   taskbar_providers:
   - codex
   always_on_top: true
@@ -24,6 +25,10 @@ provider:
 aicodemirror:
   enabled: true
   browser_timeout_seconds: 45
+relayrouter:
+  enabled: true
+  refresh_interval_seconds: 300
+  use_system_proxy: false
 kimi:
   enabled: false
   command: kimi-usage --json

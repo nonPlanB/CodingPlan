@@ -19,9 +19,9 @@ def session_path(root: Path) -> Path:
     return root / "data" / "aicodemirror.session.dpapi"
 
 
-def protect(data: bytes, *, decrypt: bool = False) -> bytes:
+def protect(data: bytes, *, decrypt: bool = False, description: str = "CodingPlan AICodeMirror session") -> bytes:
     if os.name != "nt":
-        raise OSError("AICodeMirror 登录会话需要 Windows DPAPI。")
+        raise OSError("加密凭据需要 Windows DPAPI。")
 
     class Blob(ctypes.Structure):
         _fields_ = [("size", wintypes.DWORD), ("data", ctypes.POINTER(ctypes.c_ubyte))]
@@ -41,11 +41,11 @@ def protect(data: bytes, *, decrypt: bool = False) -> bytes:
         fn = crypt.CryptProtectData
         fn.argtypes = [ctypes.POINTER(Blob), wintypes.LPCWSTR, ctypes.c_void_p,
                        ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(Blob)]
-        ok = fn(ctypes.byref(source), "CodingPlan AICodeMirror session", None,
+        ok = fn(ctypes.byref(source), description, None,
                 None, None, 1, ctypes.byref(target))
     fn.restype = wintypes.BOOL
     if not ok:
-        raise OSError("无法读取或加密登录会话，请在当前 Windows 用户下重新登录。")
+        raise OSError("无法读取或加密凭据，请在当前 Windows 用户下重新配置。")
     try:
         return ctypes.string_at(target.data, target.size)
     finally:

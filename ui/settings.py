@@ -3,7 +3,7 @@ from copy import deepcopy
 from urllib.parse import urlparse
 import subprocess
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, QThread, Signal
 
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
@@ -14,6 +14,28 @@ from core.security import sanitize_message
 from core.provider_visibility import taskbar_provider_keys
 from core.aicodemirror_session import clear_session, session_path
 from providers.aicodemirror_provider import browser_command, parse_helper_output
+from core.relayrouter_credentials import (load_credentials, save_credentials, clear_credentials,
+                                         validate_credentials)
+from providers.relayrouter_provider import query_balance
+
+
+class RelayConnectionTest(QThread):
+    completed = Signal(dict)
+
+    def __init__(self, credentials, timeout, use_system_proxy, parent=None):
+        super().__init__(parent)
+        self.credentials = credentials
+        self.timeout = timeout
+        self.use_system_proxy = use_system_proxy
+
+    def run(self):
+        try:
+            reading = query_balance(self.credentials, self.timeout, self.use_system_proxy)
+        except Exception:
+            reading = {"status": "error", "message": "连接测试未完成，请检查网络和凭据。"}
+        finally:
+            self.credentials = None
+        self.completed.emit(reading)
 
 
 class SettingsDialog(QDialog):
@@ -22,6 +44,7 @@ class SettingsDialog(QDialog):
         self.root = root
         self.config = deepcopy(config)
         self.login_process = None
+        self.relay_test_thread = None
         self.login_timer = QTimer(self)
         self.login_timer.timeout.connect(self._check_login)
         self.setWindowTitle("设置 · Coding Plan")
@@ -68,7 +91,7 @@ class SettingsDialog(QDialog):
         taskbar_selected = ui.get('taskbar_providers')
         if taskbar_selected is None:
             taskbar_selected = taskbar_provider_keys(config)
-        for key, label in [('codex', 'Codex'), ('kimi', 'Kimi'), ('deepseek', 'DeepSeek'), ('aicodemirror', 'AICodeMirror')]:
+        for key, label in [('codex', 'Codex'), ('kimi', 'Kimi'), ('deepseek', 'DeepSeek'), ('aicodemirror', 'AICodeMirror'), ('relayrouter', 'RelayRouter')]:
             group = QGroupBox(label)
             rows = QFormLayout(group)
             self.visible[key] = self.check(rows, '在界面显示', key in visible)
@@ -96,7 +119,7 @@ class SettingsDialog(QDialog):
                 self.currency.addItems(['', 'CNY', 'USD'])
                 self.currency.setCurrentText(config[key].get('preferred_currency', ''))
                 rows.addRow('首选币种（空为自动）', self.currency)
-            else:
+            elif key == 'aicodemirror':
                 self.login_status = QLabel('已有加密会话；余额刷新会验证有效性。' if session_path(root).exists() else '尚未登录。')
                 self.login_status.setWordWrap(True)
                 rows.addRow(self.login_status)
@@ -107,6 +130,33 @@ class SettingsDialog(QDialog):
                 self.logout_button.clicked.connect(self._logout)
                 rows.addRow(self.logout_button)
                 self.mirror_timeout = self.spin(rows, '浏览器查询超时 (秒)', config[key].get('browser_timeout_seconds', 45), 15, 120)
+            else:
+                self.relay_id = QLineEdit()
+                self.relay_id.setMaxLength(16)
+                self.relay_token = QLineEdit()
+                self.relay_token.setEchoMode(QLineEdit.EchoMode.Password)
+                self.relay_token.setMaxLength(4096)
+                self.relay_token.setPlaceholderText('输入新令牌；已保存时留空保留原令牌')
+                rows.addRow('用户 ID', self.relay_id)
+                rows.addRow('身份验证令牌', self.relay_token)
+                self.relay_status = QLabel()
+                self.relay_status.setWordWrap(True)
+                rows.addRow(self.relay_status)
+                self._reload_relay_credentials()
+                self.relay_save = QPushButton('保存凭据（立即生效）')
+                self.relay_save.clicked.connect(self._save_relay_credentials)
+                rows.addRow(self.relay_save)
+                self.relay_test = QPushButton('测试连接')
+                self.relay_test.clicked.connect(self._test_relay_connection)
+                rows.addRow(self.relay_test)
+                self.relay_clear = QPushButton('清除凭据（立即生效）')
+                self.relay_clear.clicked.connect(self._clear_relay_credentials)
+                rows.addRow(self.relay_clear)
+                self.relay_interval = self.spin(rows, '查询最小间隔 (秒)', config[key].get('refresh_interval_seconds', 300), 30, 86400)
+                self.relay_proxy = self.check(rows, '使用系统代理', config[key].get('use_system_proxy', False))
+                description = QLabel('凭据独立加密保存；下方保存按钮保存显示和采集选项。\n更换用户 ID 时请同时提供新令牌。测试连接不保存输入。')
+                description.setWordWrap(True)
+                rows.addRow(description)
             provider_layout.addWidget(group)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -133,6 +183,76 @@ class SettingsDialog(QDialog):
         self.logout_button.setEnabled(False)
         self.login_status.setText('请在独立的官方登录窗口完成登录，然后点击保存并关闭。')
         self.login_timer.start(500)
+
+    def _reload_relay_credentials(self):
+        try:
+            stored = load_credentials(self.root)
+        except ValueError:
+            stored = None
+            self.relay_status.setText('加密凭据无法读取，请重新保存或清除。')
+        else:
+            self.relay_status.setText('令牌已加密保存；留空保留原令牌。' if stored else '尚未配置凭据。')
+        self.relay_saved_id = stored['user_id'] if stored else ''
+        self.relay_id.setText(self.relay_saved_id)
+        self.relay_token.clear()
+
+    def _relay_candidate(self):
+        user_id, entered = self.relay_id.text().strip(), self.relay_token.text().strip()
+        if not entered:
+            stored = load_credentials(self.root)
+            if not stored or stored['user_id'] != user_id:
+                raise ValueError('首次配置或更换用户 ID 时，请输入对应的身份验证令牌。')
+            entered = stored['access_token']
+        return validate_credentials(user_id, entered)
+
+    def _save_relay_credentials(self):
+        try:
+            values = self._relay_candidate()
+            save_credentials(self.root, **values)
+        except (OSError, ValueError):
+            self.relay_status.setText('保存失败：请检查用户 ID、令牌及数据目录权限；更换 ID 需同时输入新令牌。')
+            return
+        self._reload_relay_credentials()
+        self.relay_status.setText('凭据已加密保存。可测试连接，然后保存显示和采集选项。')
+
+    def _clear_relay_credentials(self):
+        try:
+            clear_credentials(self.root)
+        except OSError:
+            self.relay_status.setText('清除失败，请检查数据目录权限。')
+            return
+        self._reload_relay_credentials()
+        self.relay_status.setText('已清除本地凭据和缓存余额。')
+
+    def _test_relay_connection(self):
+        if self.relay_test_thread is not None:
+            return
+        try:
+            values = self._relay_candidate()
+        except ValueError as exc:
+            self.relay_status.setText(str(exc))
+            return
+        self.relay_status.setText('正在测试连接…')
+        for field in (self.relay_id, self.relay_token, self.relay_save, self.relay_test, self.relay_clear):
+            field.setEnabled(False)
+        self.relay_test_thread = RelayConnectionTest(values, self.timeout.value(), self.relay_proxy.isChecked(), self)
+        self.relay_test_thread.completed.connect(self._relay_test_result)
+        self.relay_test_thread.finished.connect(self._relay_test_finished)
+        self.relay_test_thread.start()
+
+    def _relay_test_result(self, reading):
+        if reading.get('status') == 'ok':
+            self.relay_status.setText('连接成功，账户余额 ' + reading['balance']['display'] + '。测试未保存输入。')
+        else:
+            self.relay_status.setText(reading.get('message') or '连接失败。')
+
+    def _relay_test_finished(self):
+        thread = self.relay_test_thread
+        self.relay_test_thread = None
+        if thread is not None:
+            thread.deleteLater()
+        for field in (self.relay_id, self.relay_token, self.relay_save, self.relay_test, self.relay_clear):
+            field.setEnabled(True)
 
     def _check_login(self):
         if self.login_process is None or self.login_process.poll() is None:
@@ -161,6 +281,9 @@ class SettingsDialog(QDialog):
     def done(self, code):
         if self.login_process is not None:
             self.login_status.setText('请先关闭独立登录窗口，再保存或取消设置。')
+            return
+        if self.relay_test_thread is not None:
+            self.relay_status.setText('正在测试连接，请稍候完成后再关闭设置。')
             return
         super().done(code)
 
@@ -194,6 +317,12 @@ class SettingsDialog(QDialog):
         return widget
 
     def save(self):
+        if self.relay_test_thread is not None:
+            self.relay_status.setText('正在测试连接，请完成后再保存设置。')
+            return
+        if self.relay_token.text() or self.relay_id.text().strip() != self.relay_saved_id:
+            self.relay_status.setText('凭据尚未保存，请先点击“保存凭据”，或还原输入。')
+            return
         command = self.codex_command.text().strip()
         url = self.balance_url.text().strip()
         if self.enabled['codex'].isChecked() and self.mode.currentData() == 'custom_command' and not command:
@@ -222,6 +351,7 @@ class SettingsDialog(QDialog):
         self.config['kimi']['command'] = self.kimi_command.text().strip()
         self.config['deepseek'].update(balance_url=url, preferred_currency=self.currency.currentText().strip().upper())
         self.config['aicodemirror']['browser_timeout_seconds'] = self.mirror_timeout.value()
+        self.config['relayrouter'].update(refresh_interval_seconds=self.relay_interval.value(), use_system_proxy=self.relay_proxy.isChecked())
         try:
             save_config(self.root, self.config)
         except OSError as exc:

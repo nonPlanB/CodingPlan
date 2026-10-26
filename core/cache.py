@@ -25,6 +25,7 @@ def initial_usage(message: str = "No usage data collected yet.") -> dict[str, An
             "kimi": empty_provider("Kimi", "unsupported", message),
             "deepseek": empty_provider("DeepSeek", "unsupported", message),
             "aicodemirror": {"name": "AICodeMirror", "status": "unsupported", "balance": None, "message": message},
+            "relayrouter": {"name": "RelayRouter", "status": "unsupported", "balance": None, "message": message},
         },
     }
 

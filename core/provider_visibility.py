@@ -1,6 +1,6 @@
 """Independent taskbar selection, with compatibility for older settings."""
 
-PROVIDER_KEYS = ("codex", "kimi", "deepseek", "aicodemirror")
+PROVIDER_KEYS = ("codex", "kimi", "deepseek", "aicodemirror", "relayrouter")
 
 
 def taskbar_provider_keys(config):

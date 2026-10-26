@@ -55,7 +55,7 @@ class QuotaRing(QWidget):
             self.logo = QIcon(str(logo_path(key, light))).pixmap(64, 64)
             self.setProperty("logo_key", (key, light))
         self.light = light
-        name = {"codex": "Codex", "kimi": "Kimi", "deepseek": "DeepSeek", "aicodemirror": "AICodeMirror"}.get(key, key)
+        name = {"codex": "Codex", "kimi": "Kimi", "deepseek": "DeepSeek", "aicodemirror": "AICodeMirror", "relayrouter": "RelayRouter"}.get(key, key)
         def percent(value):
             return "--" if value is None else f"{value:g}%"
         description = name
@@ -66,7 +66,7 @@ class QuotaRing(QWidget):
             if reset == "soon":
                 reset = "即将重置"
             description += f"\n{label}剩余量：{percent(value)} · 重置时间：{reset}"
-        if key in ("deepseek", "aicodemirror"):
+        if key in ("deepseek", "aicodemirror", "relayrouter"):
             balance = data.get("balance") or {}
             description = f"{name}\n剩余余额：{balance.get('currency') or ''} {balance.get('total', '--')}\n重置时间：不适用（无周/5H限额）"
         if self.stale:
@@ -166,7 +166,7 @@ class TaskbarQuotaStrip(QWidget):
         layout.setContentsMargins(2, 0, 2, 0)
         layout.setSpacing(4)
         self.rings = []
-        for _ in range(4):
+        for _ in range(5):
             ring = QuotaRing(self)
             layout.addWidget(ring)
             self.rings.append(ring)
